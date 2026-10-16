@@ -1,0 +1,26 @@
+// FocusOut is not guaranteed when Slint 1.8 destroys a popup/subtree.
+// Focused controls renew a short lease; destroyed controls stop renewing it.
+export global LiveFocus {
+    out property <int> input-count: 0;
+    out property <int> lease-ticks: 0;
+    out property <bool> active: self.input-count > 0 || self.lease-ticks > 0;
+    public function heartbeat() { self.lease-ticks = 4; self.input-count = max(1, self.input-count); }
+    public function input-gained() { self.input-count += 1; self.lease-ticks = 4; }
+    public function input-lost() { self.input-count = max(0, self.input-count - 1); }
+    public function sweep() {
+        self.lease-ticks = max(0, self.lease-ticks - 1);
+        if (self.lease-ticks == 0) { self.input-count = 0; }
+    }
+}
+
+// A stationary held pointer remains an interaction even without move events.
+export component LiveTouchArea inherits TouchArea {
+    property <bool> live-press-counted: false;
+    changed pressed => {
+        if (self.pressed != self.live-press-counted) {
+            self.live-press-counted = self.pressed;
+            if (self.pressed) { LiveFocus.input-gained(); } else { LiveFocus.input-lost(); }
+        }
+    }
+    Timer { interval: 150ms; running: root.pressed; triggered => { LiveFocus.heartbeat(); } }
+}

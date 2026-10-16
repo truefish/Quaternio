@@ -1,0 +1,242 @@
+# Tag-triggered multi-OS release. Jobs listed Windows → Linux → macOS (priority).
+# FFmpeg URLs are pinned to concrete autobuild/version assets (not *-latest-*).
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  # BtbN FFmpeg-Builds 8.1 GPL static — pin tag + filename together when upgrading
+  FFMPEG_WIN_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-16-13-04/ffmpeg-n8.1.3-18-g46d899d7a0-win64-gpl-8.1.zip
+  FFMPEG_LINUX_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-16-13-04/ffmpeg-n8.1.3-18-g46d899d7a0-linux64-gpl-8.1.tar.xz
+  # macOS: OSXExperts (arm64) / evermeet (x86_64) — versioned zips, not "latest"
+  FFMPEG_MAC_ARM_FFMPEG_URL: https://www.osxexperts.net/ffmpeg711arm.zip
+  FFMPEG_MAC_ARM_FFPROBE_URL: https://www.osxexperts.net/ffprobe711arm.zip
+  FFMPEG_MAC_X64_FFMPEG_URL: https://evermeet.cx/ffmpeg/ffmpeg-9.0.2.zip
+  FFMPEG_MAC_X64_FFPROBE_URL: https://evermeet.cx/ffmpeg/ffprobe-9.0.2.zip
+
+jobs:
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Download pinned FFmpeg (win64)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path packaging/cache | Out-Null
+          $zip = "packaging/cache/ffmpeg-win64.zip"
+          Invoke-WebRequest -Uri $env:FFMPEG_WIN_URL -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath packaging/cache/ffmpeg-win64 -Force
+          $bin = Get-ChildItem -Path packaging/cache/ffmpeg-win64 -Recurse -Filter ffmpeg.exe |
+            Select-Object -First 1 -ExpandProperty DirectoryName
+          if (-not $bin) { throw "ffmpeg.exe not found in FFmpeg archive" }
+          Copy-Item (Join-Path $bin "ffmpeg.exe") packaging/cache/ffmpeg.exe
+          Copy-Item (Join-Path $bin "ffprobe.exe") packaging/cache/ffprobe.exe
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Stage and package
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          New-Item -ItemType Directory -Force -Path packaging/stage, dist | Out-Null
+          Copy-Item target/release/quaternio.exe packaging/stage/quaternio.exe
+          Copy-Item packaging/cache/ffmpeg.exe packaging/stage/ffmpeg.exe
+          Copy-Item packaging/cache/ffprobe.exe packaging/stage/ffprobe.exe
+          Copy-Item LICENSE packaging/stage/LICENSE
+
+          $portable = "dist/Quaternio-Windows-Portable-$tag.zip"
+          if (Test-Path $portable) { Remove-Item $portable }
+          Compress-Archive -Path packaging/stage/* -DestinationPath $portable
+
+          $makensis = @(
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+            "$env:ProgramFiles\NSIS\makensis.exe",
+            (Get-Command makensis -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $makensis) { throw "makensis.exe not found after NSIS install" }
+          Push-Location packaging
+          & $makensis quaternio.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit $LASTEXITCODE" }
+          Pop-Location
+          # OutFile in quaternio.nsi is ..\dist\Quaternio-Setup.exe
+          Move-Item -Force dist/Quaternio-Setup.exe "dist/Quaternio-Setup-$tag.exe"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/Quaternio-Windows-Portable-*.zip
+            dist/Quaternio-Setup-*.exe
+
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Slint/winit apt deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
+            libfontconfig-dev libx11-xcb-dev libxcursor-dev \
+            libxkbcommon-x11-dev libx11-dev libwayland-dev \
+            libasound2-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download pinned FFmpeg (linux64)
+        run: |
+          mkdir -p packaging/cache
+          curl -L --fail --retry 3 -o packaging/cache/ffmpeg-linux64.tar.xz "$FFMPEG_LINUX_URL"
+          mkdir -p packaging/cache/ffmpeg-linux64
+          tar -xJf packaging/cache/ffmpeg-linux64.tar.xz -C packaging/cache/ffmpeg-linux64
+          BIN=$(find packaging/cache/ffmpeg-linux64 -type f -name ffmpeg | head -n1 | xargs dirname)
+          test -n "$BIN"
+          cp "$BIN/ffmpeg" packaging/cache/ffmpeg
+          cp "$BIN/ffprobe" packaging/cache/ffprobe
+          chmod +x packaging/cache/ffmpeg packaging/cache/ffprobe
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package tar.gz
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          NAME="Quaternio-Linux-x86_64-${TAG}"
+          STAGE="packaging/stage/${NAME}"
+          mkdir -p "$STAGE" dist
+          cp target/release/quaternio "$STAGE/quaternio"
+          cp packaging/cache/ffmpeg "$STAGE/ffmpeg"
+          cp packaging/cache/ffprobe "$STAGE/ffprobe"
+          cp LICENSE "$STAGE/LICENSE"
+          chmod +x "$STAGE/quaternio" "$STAGE/ffmpeg" "$STAGE/ffprobe"
+          tar -czf "dist/${NAME}.tar.gz" -C packaging/stage "$NAME"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/Quaternio-Linux-x86_64-*.tar.gz
+
+  macos:
+    name: macOS (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 = Apple Silicon (arm64); macos-13 = Intel (x86_64)
+        os: [macos-14, macos-13]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download pinned FFmpeg (macOS)
+        run: |
+          ARCH="$(uname -m)"
+          mkdir -p packaging/cache
+          if [ "$ARCH" = "arm64" ]; then
+            curl -L --fail --retry 3 -o packaging/cache/ffmpeg.zip "$FFMPEG_MAC_ARM_FFMPEG_URL"
+            curl -L --fail --retry 3 -o packaging/cache/ffprobe.zip "$FFMPEG_MAC_ARM_FFPROBE_URL"
+          else
+            curl -L --fail --retry 3 -o packaging/cache/ffmpeg.zip "$FFMPEG_MAC_X64_FFMPEG_URL"
+            curl -L --fail --retry 3 -o packaging/cache/ffprobe.zip "$FFMPEG_MAC_X64_FFPROBE_URL"
+          fi
+          unzip -o packaging/cache/ffmpeg.zip -d packaging/cache/ffmpeg-extract
+          unzip -o packaging/cache/ffprobe.zip -d packaging/cache/ffprobe-extract
+          FFMPEG_BIN=$(find packaging/cache/ffmpeg-extract -type f -name ffmpeg | head -n1)
+          FFPROBE_BIN=$(find packaging/cache/ffprobe-extract -type f -name ffprobe | head -n1)
+          test -n "$FFMPEG_BIN" && test -n "$FFPROBE_BIN"
+          cp "$FFMPEG_BIN" packaging/cache/ffmpeg
+          cp "$FFPROBE_BIN" packaging/cache/ffprobe
+          chmod +x packaging/cache/ffmpeg packaging/cache/ffprobe
+          # Ad-hoc sign so Gatekeeper is less hostile for unsigned beta sidecars
+          codesign -s - packaging/cache/ffmpeg packaging/cache/ffprobe || true
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package unsigned tar.gz
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ARCH="$(uname -m)"
+          NAME="Quaternio-macOS-${ARCH}-${TAG}"
+          STAGE="packaging/stage/${NAME}"
+          mkdir -p "$STAGE" dist
+          cp target/release/quaternio "$STAGE/quaternio"
+          cp packaging/cache/ffmpeg "$STAGE/ffmpeg"
+          cp packaging/cache/ffprobe "$STAGE/ffprobe"
+          cp LICENSE "$STAGE/LICENSE"
+          chmod +x "$STAGE/quaternio" "$STAGE/ffmpeg" "$STAGE/ffprobe"
+          codesign -s - "$STAGE/quaternio" || true
+          tar -czf "dist/${NAME}.tar.gz" -C packaging/stage "$NAME"
+          echo "Packed ${NAME}.tar.gz (uname -m = ${ARCH})"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.os }}
+          path: dist/Quaternio-macOS-*.tar.gz
+
+  publish:
+    name: Publish GitHub Release
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release files
+        id: files
+        run: |
+          mkdir -p release
+          find artifacts -type f \( \
+            -name 'Quaternio-Windows-Portable-*.zip' -o \
+            -name 'Quaternio-Setup-*.exe' -o \
+            -name 'Quaternio-Linux-x86_64-*.tar.gz' -o \
+            -name 'Quaternio-macOS-*.tar.gz' \
+          \) -exec cp {} release/ \;
+          ls -la release/
+          COUNT="$(find release -type f | wc -l | tr -d ' ')"
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+          # Expect: Win zip + Setup + Linux tar + macOS arm64 + macOS x86_64 = 5
+          if [ "$COUNT" -lt 5 ]; then
+            echo "Expected at least 5 release files, found ${COUNT}" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Quaternio ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          generate_release_notes: true
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
