@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+
+[package]
+name = "quaternio"
+version = "0.1.0-beta.1"
+edition = "2021"
+description = "Quaternio, a native desktop editor for media, cut, grade, and export."
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+i-slint-backend-winit = { version = "=1.8.0", default-features = false, features = ["renderer-software"] }
+rfd = "0.15"
+rayon = "1.12"
+rodio = "0.19"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10"
+slint = { version = "=1.8.0", default-features = false, features = ["renderer-software", "backend-winit", "std", "compat-1-2"] }
+roxmltree = "0.21.1"
+ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
+semver = "1"
+open = "5"
+zip = "2"
+flate2 = "1"
+tar = "0.4"
+
+[build-dependencies]
+slint-build = "=1.8.0"

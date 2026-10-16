@@ -1,0 +1,18 @@
+# Rust
+debug/
+target/
+**/*.rs.bk
+*.pdb
+
+# Local tooling / nested junk
+.toolchain/
+quaternio/
+.qa/
+.research/
+dist/
+packaging/cache/
+packaging/stage/
+
+# OS
+.DS_Store
+Thumbs.db

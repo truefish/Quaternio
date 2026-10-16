@@ -1,0 +1,303 @@
+import { LiveFocus, LiveTouchArea } from "live-focus.slint";
+component OrganizerButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 26px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: #363636;
+    background: !root.enabled ? #202020 : touch.pressed ? #303030 : touch.has-hover ? #363636 : #272727;
+    Text {
+        text: root.label;
+        color: root.enabled ? #F0F3F7 : #747474;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := LiveTouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component ProjectOrganizer inherits Rectangle {
+    in property <length> window-width: 1280px;
+    in property <length> window-height: 800px;
+    in property <[string]> bins;
+    in property <string> current-bin;
+    in property <bool> selected-media;
+    callback create-bin(string);
+    callback choose-bin(string);
+    callback move-to-bin(string);
+
+    private property <bool> moving: false;
+    private property <int> highlighted: 0;
+    private property <string> new-name: "";
+    height: 30px;
+    min-width: 200px;
+
+    forward-focus: organizer-focus;
+    property <bool> bins-opening: false;
+    organizer-focus := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " " || event.text == Key.DownArrow) {
+                root.moving = false;
+                root.highlighted = max(0, min(root.bins.length, root.highlighted));
+                new-bin-menu.close(); root.bins-opening = true; bins-menu.show();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    function choose-target(index: int) {
+        if (index < 0 || index > root.bins.length) { return; }
+        root.highlighted = index;
+        bins-menu.close();
+        organizer-focus.focus();
+        if (root.moving) {
+            root.move-to-bin(index == 0 ? "" : root.bins[index - 1]);
+        } else {
+            root.choose-bin(index == 0 ? "" : root.bins[index - 1]);
+        }
+    }
+
+    function submit-new-bin() {
+        if (root.new-name == "") { return; }
+        root.create-bin(root.new-name);
+        new-bin-menu.close();
+        root.new-name = "";
+    }
+
+    HorizontalLayout {
+        padding-top: 2px;
+        padding-bottom: 2px;
+        spacing: 5px;
+        Rectangle {
+            min-width: 70px;
+            horizontal-stretch: 1;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: #363636;
+            background: filter-touch.has-hover ? #272727 : #181818;
+            Text {
+                x: 8px;
+                width: parent.width - 28px;
+                height: 100%;
+                text: root.current-bin == "" ? "All media" : root.current-bin;
+                color: #F0F3F7;
+                font-size: 11px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Image {
+                x: parent.width - 20px;
+                y: (parent.height - 16px) / 2;
+                width: 16px;
+                height: 16px;
+                source: @image-url("icons/chevron-down.svg");
+                colorize: #ABABAB;
+                image-fit: contain;
+            }
+            filter-touch := LiveTouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.moving = false;
+                    root.highlighted = max(0, min(root.bins.length, root.highlighted));
+                    new-bin-menu.close();
+                    root.bins-opening = true; bins-menu.show();
+                }
+            }
+        }
+        OrganizerButton {
+            width: 66px;
+            label: "Move to…";
+            enabled: root.selected-media;
+            clicked => {
+                root.moving = true;
+                root.highlighted = max(0, min(root.bins.length, root.highlighted));
+                new-bin-menu.close();
+                root.bins-opening = true; bins-menu.show();
+            }
+        }
+        OrganizerButton {
+            width: 57px;
+            label: "+ Bin";
+            clicked => { bins-menu.close(); new-bin-menu.show(); }
+        }
+    }
+
+    bins-menu := PopupWindow {
+        x: max(8px - filter-touch.absolute-position.x, min(0px, root.window-width - filter-touch.absolute-position.x - self.width - 8px));
+        y: filter-touch.absolute-position.y + root.height + self.height + 3px <= root.window-height - 8px ? root.height + 3px : max(8px - filter-touch.absolute-position.y, -self.height - 3px);
+        width: min(max(root.width, 240px), root.window-width - 16px);
+        height: min(min(252px, root.window-height - 24px), (root.bins.length + 1) * 28px + 8px);
+        close-on-click: true;
+        forward-focus: menu-focus;
+        Timer {
+            interval: 1ms;
+            running: root.bins-opening;
+            triggered => { root.bins-opening = false; menu-focus.focus(); menu-focus.reveal-bin(); }
+        }
+        menu-focus := FocusScope {
+                Timer { interval: 150ms; running: menu-focus.has-focus; triggered => { LiveFocus.heartbeat(); } }
+            property <bool> live-focus-counted: false;
+            changed has-focus => {
+                if (self.has-focus != self.live-focus-counted) {
+                    self.live-focus-counted = self.has-focus;
+                    if (self.has-focus) { LiveFocus.input-gained(); } else { LiveFocus.input-lost(); }
+                }
+            }
+
+    function reveal-bin() {
+        bin-scroll.viewport-y = -max(0px, min(max(0px, bin-scroll.viewport-height - bin-scroll.height), max(root.highlighted * 28px + 28px - bin-scroll.height, min(-bin-scroll.viewport-y, root.highlighted * 28px))));
+    }
+
+            key-pressed(event) => {
+                if (event.text == Key.Escape || event.text == Key.Tab || event.text == Key.Backtab) { bins-menu.close(); organizer-focus.focus(); return accept; }
+                if (event.text == Key.UpArrow) { root.highlighted = max(0, root.highlighted - 1); menu-focus.reveal-bin(); return accept; }
+                if (event.text == Key.DownArrow) { root.highlighted = min(root.bins.length, root.highlighted + 1); menu-focus.reveal-bin(); return accept; }
+                if (event.text == Key.Return) { root.choose-target(root.highlighted); return accept; }
+                return accept;
+            }
+            Rectangle {
+                background: #272727;
+                border-width: 1px;
+                border-color: #454545;
+                border-radius: 4px;
+                bin-scroll := Flickable {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px;
+                    height: parent.height - 8px;
+                    viewport-height: (root.bins.length + 1) * 28px;
+                    viewport-width: self.width;
+                    viewport-y: 0px;
+                    interactive: true;
+                    VerticalLayout {
+                        spacing: 0px;
+                        Rectangle {
+                            height: 28px;
+                            border-radius: 3px;
+                            background: root.highlighted == 0 || all-touch.has-hover ? #20354A : transparent;
+                            Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: 100%;
+                                text: root.moving ? "Unsorted" : "All media";
+                                color: root.current-bin == "" ? #5AB2F3 : #F0F3F7;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            all-touch := LiveTouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.choose-target(0); }
+                            }
+                        }
+                        for bin[index] in root.bins: Rectangle {
+                            height: 28px;
+                            border-radius: 3px;
+                            background: root.highlighted == index + 1 || bin-touch.has-hover ? #20354A : transparent;
+                            Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: 100%;
+                                text: bin;
+                                color: root.current-bin == bin ? #5AB2F3 : #F0F3F7;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            bin-touch := LiveTouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.choose-target(index + 1); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    new-bin-menu := PopupWindow {
+        x: max(8px - filter-touch.absolute-position.x, min(0px, root.window-width - filter-touch.absolute-position.x - self.width - 8px));
+        y: filter-touch.absolute-position.y + root.height + self.height + 3px <= root.window-height - 8px ? root.height + 3px : max(8px - filter-touch.absolute-position.y, -self.height - 3px);
+        width: min(max(root.width, 270px), root.window-width - 16px);
+        height: 92px;
+        close-on-click: false;
+        forward-focus: new-name-input;
+        Timer {
+            interval: 1ms;
+            triggered => { self.running = false; new-name-input.focus(); }
+        }
+        FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Escape) { new-bin-menu.close(); return accept; }
+                return reject;
+            }
+        Rectangle {
+            background: #272727;
+            border-width: 1px;
+            border-color: #454545;
+            border-radius: 4px;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 7px;
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: "New bin · use / for a folder path";
+                        color: #ABABAB;
+                        font-size: 11px;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    OrganizerButton {
+                        width: 20px;
+                        height: 18px;
+                        label: "×";
+                        clicked => { new-bin-menu.close(); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        border-width: 1px;
+                        border-color: new-name-input.has-focus ? #5AB2F3 : #363636;
+                        border-radius: 4px;
+                        background: #181818;
+                        new-name-input := TextInput {
+                Timer { interval: 150ms; running: new-name-input.has-focus; triggered => { LiveFocus.heartbeat(); } }
+                property <bool> live-focus-counted: false;
+                            changed has-focus => { if (self.has-focus != self.live-focus-counted) { self.live-focus-counted = self.has-focus; if (self.has-focus) { LiveFocus.input-gained(); } else { LiveFocus.input-lost(); } } }
+                            x: 7px;
+                            width: parent.width - 14px;
+                            height: 100%;
+                            text <=> root.new-name;
+                            color: #F0F3F7;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            accepted => { root.submit-new-bin(); }
+                        }
+                    }
+                    OrganizerButton {
+                        width: 58px;
+                        label: "Create";
+                        enabled: root.new-name != "";
+                        clicked => { root.submit-new-bin(); }
+                    }
+                }
+                Text {
+                    text: "Esc cancels";
+                    color: #ABABAB;
+                    font-size: 10px;
+                }
+            }
+        }
+        }
+    }
+}
