@@ -55,25 +55,36 @@ cd Quaternio-Linux-x86_64-v0.1.0-beta.1
 ./quaternio
 ```
 
+Linux builds default to the OpenGL (FemtoVG) renderer so button presses keep redrawing under Wayland. Drag-and-drop from the file manager works on X11, Windows, and macOS; native Wayland does not deliver file-drop events yet (winit), so use **File → Import** there, or:
+
+```bash
+WINIT_UNIX_BACKEND=x11 ./quaternio
+```
+
+If OpenGL is unavailable and the UI looks frozen while clicks still “work”, force software rendering or X11:
+
+```bash
+SLINT_BACKEND=winit-software ./quaternio
+# or:
+WINIT_UNIX_BACKEND=x11 ./quaternio
+```
+
 If the app fails to start because a library is missing, install common desktop libraries (Debian/Ubuntu):
 
 ```bash
 sudo apt install libxcb-shape0 libxcb-xfixes0 libxkbcommon0 libxkbcommon-x11-0 \
-  libfontconfig1 libx11-xcb1 libxcursor1 libwayland-client0 libasound2t64 || \
+  libfontconfig1 libx11-xcb1 libxcursor1 libwayland-client0 libegl1 libgl1 \
+  libasound2t64 || \
 sudo apt install libxcb-shape0 libxcb-xfixes0 libxkbcommon0 libxkbcommon-x11-0 \
-  libfontconfig1 libx11-xcb1 libxcursor1 libwayland-client0 libasound2
+  libfontconfig1 libx11-xcb1 libxcursor1 libwayland-client0 libegl1 libgl1 \
+  libasound2
 ```
 
 ### macOS
 
-Release builds ship as **Apple Silicon (`arm64`)** and **Intel (`x86_64`)**. Download the archive that matches your Mac:
+This beta ships **Apple Silicon (`arm64`)** builds (`Quaternio-macOS-arm64-v….tar.gz`). Intel macOS downloads are deferred while GitHub’s older Intel runners are unavailable.
 
-| Mac | File |
-|-----|------|
-| Apple Silicon (M1/M2/M3/…) | `Quaternio-macOS-arm64-v….tar.gz` |
-| Intel | `Quaternio-macOS-x86_64-v….tar.gz` |
-
-1. Download the matching archive.
+1. Download the arm64 archive.
 2. Extract and enter the folder:
 
 ```bash
@@ -81,7 +92,7 @@ tar -xzf Quaternio-macOS-arm64-v0.1.0-beta.1.tar.gz
 cd Quaternio-macOS-arm64-v0.1.0-beta.1
 ```
 
-(Replace `arm64` with `x86_64` on Intel Macs. Use the exact names from the release.)
+(Use the exact names from the release.)
 
 3. Clear Gatekeeper quarantine (needed for this unsigned beta):
 
@@ -135,7 +146,8 @@ sudo apt update
 sudo apt install build-essential pkg-config \
   libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
   libfontconfig-dev libx11-xcb-dev libxcursor-dev \
-  libxkbcommon-x11-dev libx11-dev libwayland-dev libasound2-dev
+  libxkbcommon-x11-dev libx11-dev libwayland-dev libasound2-dev \
+  libegl1-mesa-dev libgl1-mesa-dev
 ```
 
 3. Install FFmpeg (`ffmpeg` and `ffprobe` on your `PATH`), or plan to copy them next to the binary.

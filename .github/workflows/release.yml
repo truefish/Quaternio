@@ -100,7 +100,7 @@ jobs:
             libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
             libfontconfig-dev libx11-xcb-dev libxcursor-dev \
             libxkbcommon-x11-dev libx11-dev libwayland-dev \
-            libasound2-dev
+            libasound2-dev libegl1-mesa-dev libgl1-mesa-dev
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -145,8 +145,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 = Apple Silicon (arm64); macos-13 = Intel (x86_64)
-        os: [macos-14, macos-13]
+        # macos-14 = Apple Silicon (arm64).
+        # macos-13 was retired by GitHub (queues forever with no runner).
+        # Intel (x86_64) via macos-15-intel is deferred for a later beta.
+        os: [macos-14]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -224,9 +226,9 @@ jobs:
           ls -la release/
           COUNT="$(find release -type f | wc -l | tr -d ' ')"
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
-          # Expect: Win zip + Setup + Linux tar + macOS arm64 + macOS x86_64 = 5
-          if [ "$COUNT" -lt 5 ]; then
-            echo "Expected at least 5 release files, found ${COUNT}" >&2
+          # Expect: Win zip + Setup + Linux tar + macOS arm64 = 4
+          if [ "$COUNT" -lt 4 ]; then
+            echo "Expected at least 4 release files, found ${COUNT}" >&2
             exit 1
           fi
 

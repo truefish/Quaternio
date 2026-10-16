@@ -111,7 +111,7 @@ component PlayBtn inherits Rectangle {
     }
     width: 30px; height: 28px; border-radius: 2px;
     border-width: button-focus.has-focus ? 1px : 0px; border-color: Palette.accent;
-    background: touch.pressed || touch.has-hover ? Palette.bg3 : transparent;
+    background: touch.show-pressed || touch.has-hover ? Palette.bg3 : transparent;
     touch := LiveTouchArea { mouse-cursor: root.enabled ? pointer : default; clicked => { if (root.enabled && !KeyboardControls.blocked) { button-focus.focus(); root.clicked(); } }
         changed has-hover => { root.show-help(); }
     }
@@ -157,7 +157,7 @@ component IconBtn inherits Rectangle {
     width: 28px; height: 28px; border-radius: 2px;
     border-width: button-focus.has-focus ? 1px : 0px;
     border-color: Palette.accent;
-    background: !root.enabled ? transparent : touch.pressed ? Palette.row-pressed : root.armed ? Palette.accent-muted : touch.has-hover ? Palette.bg3 : transparent;
+    background: !root.enabled ? transparent : touch.show-pressed ? Palette.row-pressed : root.armed ? Palette.accent-muted : touch.has-hover ? Palette.bg3 : transparent;
     touch := LiveTouchArea { mouse-cursor: root.enabled ? pointer : default; clicked => { if (root.enabled && !KeyboardControls.blocked) { button-focus.focus(); root.clicked(); } }
         changed has-hover => { root.show-help(); }
     }
@@ -276,7 +276,7 @@ component SecBtn inherits Rectangle {
     callback clicked();
     horizontal-stretch: 0; height: 28px; border-radius: 4px;
     border-width: 1px; border-color: Palette.bg3;
-    background: !root.enabled ? Palette.bg2 : touch.pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
+    background: !root.enabled ? Palette.bg2 : touch.show-pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
     touch := LiveTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if (root.enabled) { root.clicked(); } } }
     HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: start;
         Text { text: root.label; color: root.enabled ? Palette.text-primary : Palette.text-disabled; font-size: 12px; font-weight: 500; horizontal-alignment: left; vertical-alignment: center; horizontal-stretch: 1; min-width: 0px; overflow: elide; }
@@ -291,7 +291,7 @@ component PriBtn inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
     horizontal-stretch: 0; height: 28px; border-radius: 4px; border-width: 0px;
-    background: !root.enabled ? Palette.bg3 : touch.pressed ? Palette.accent-action-pressed : touch.has-hover ? Palette.accent-action-hover : Palette.accent-action;
+    background: !root.enabled ? Palette.bg3 : touch.show-pressed ? Palette.accent-action-pressed : touch.has-hover ? Palette.accent-action-hover : Palette.accent-action;
     touch := LiveTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if (root.enabled) { root.clicked(); } } }
     HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: start;
         Text { text: root.label; color: root.enabled ? Palette.text-on-action : Palette.text-disabled; font-size: 12px; font-weight: 600; horizontal-alignment: left; vertical-alignment: center; }
@@ -306,7 +306,7 @@ component TextBtn inherits Rectangle {
     in property <bool> expanded: false;
     callback clicked();
     horizontal-stretch: 0; height: 26px; border-radius: 4px;
-    background: !root.enabled ? Palette.bg2 : touch.pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
+    background: !root.enabled ? Palette.bg2 : touch.show-pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
     touch := LiveTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if (root.enabled) { root.clicked(); } }
         changed has-hover => {
             if (self.has-hover && root.tooltip != "") {
@@ -355,9 +355,9 @@ component MenuEntry inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
     height: 28px; border-radius: 3px;
-    background: !root.enabled ? Palette.bg2 : touch.pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
+    background: !root.enabled ? Palette.bg2 : touch.show-pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
     touch := LiveTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if (root.enabled) { root.clicked(); } } }
-    HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 12px; 
+    HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 12px;
         Text { text: root.label; color: root.enabled ? Palette.text-primary : Palette.text-disabled; font-size: 12px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; horizontal-stretch: 1; min-width: 0px; overflow: elide; }
         Text { text: root.hint; color: root.enabled ? Palette.text-secondary : Palette.text-disabled; font-size: 11px; font-weight: 400; horizontal-alignment: right; vertical-alignment: center; horizontal-stretch: 0; min-width: 0px; max-width: max(48px, (root.width - 32px) / 2); overflow: elide; }
     }
@@ -1187,7 +1187,7 @@ component ToolBtn inherits Rectangle {
     callback clicked();
     horizontal-stretch: 0; height: 28px; border-radius: 4px;
     border-width: 0px; border-color: Palette.accent;
-    background: root.armed ? Palette.accent-muted : touch.pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
+    background: root.armed ? Palette.accent-muted : touch.show-pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
     touch := LiveTouchArea { mouse-cursor: pointer; clicked => { root.clicked(); }
         changed has-hover => {
             if (self.has-hover && root.tooltip != "") {
@@ -1496,6 +1496,7 @@ export component AppWindow inherits Window {
     in-out property <bool> show-import-mode: false;
     in-out property <bool> show-import-report: false;
     in-out property <string> import-report-text: "";
+    in property <bool> file-drop-hover: false;
     in property <bool> update-available: false;
     in property <string> update-tooltip: "";
     in-out property <bool> show-update-agree: false;
@@ -2624,6 +2625,13 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
             }
         }
 
+        if root.file-drop-hover && !root.media-drag-active: Rectangle {
+            width: 100%; height: 100%; z: 3; background: #00000066;
+            VerticalLayout { alignment: center; spacing: 8px;
+                Text { text: "Drop to import"; color: Palette.text-primary; font-size: 18px; font-weight: 600; horizontal-alignment: center; }
+                Text { text: "Media files add to the Project bin. Premiere / Resolve / FCPXML open the timeline import dialog."; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
+            }
+        }
         if root.show-dialog || root.show-prefs || root.show-about || root.show-import-mode || root.show-import-report || root.show-update-agree: Rectangle { width: 100%; height: 100%; z: 4; background: #00000088; LiveTouchArea { } }
         if root.show-update-agree: Rectangle {
             x: (parent.width - 440px) / 2; y: (parent.height - self.height) / 2; z: 5; width: 440px; height: 220px;

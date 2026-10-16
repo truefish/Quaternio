@@ -473,9 +473,10 @@ pub fn run() -> anyhow::Result<()> {
                     live::tick(&ui, &timer_state);
                     return;
                 }
+                ui.set_file_drop_hover(file_drops.is_hovering_files());
                 let paths = file_drops.take_paths();
                 if !paths.is_empty() {
-                    import_paths(&ui, &timer_state, paths);
+                    handle_dropped_files(&ui, &timer_state, paths);
                 }
                 let overflow = file_drops.take_overflow_count();
                 if overflow > 0 {
@@ -5879,6 +5880,41 @@ fn finish_timeline_import(
             set_status(state, error);
             full_sync(ui, state);
         }
+    }
+}
+
+fn handle_dropped_files(
+    ui: &AppWindow,
+    state: &Rc<std::cell::RefCell<AppState>>,
+    paths: Vec<PathBuf>,
+) {
+    ui.set_file_drop_hover(false);
+    if paths.is_empty() {
+        return;
+    }
+    let mut media = Vec::new();
+    let mut timelines = Vec::new();
+    for path in paths {
+        if crate::import::path_looks_like_timeline(&path) {
+            timelines.push(path);
+        } else {
+            media.push(path);
+        }
+    }
+    if !media.is_empty() {
+        import_paths(ui, state, media);
+    }
+    if let Some(path) = timelines.first().cloned() {
+        let extra = timelines.len().saturating_sub(1);
+        if extra > 0 {
+            set_status(
+                state,
+                format!("Importing first timeline; {extra} additional timeline files skipped"),
+            );
+        }
+        state.borrow_mut().timeline_import_path = Some(path);
+        ui.set_show_import_mode(true);
+        ui.set_open_menu(0);
     }
 }
 

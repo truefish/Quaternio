@@ -22,6 +22,7 @@ mod update;
 mod app;
 
 fn main() {
+    prefer_responsive_linux_backend();
     match cli::run_if_requested() {
         Ok(true) => return,
         Ok(false) => {}
@@ -33,5 +34,19 @@ fn main() {
     if let Err(err) = app::run() {
         eprintln!("Quaternio: {err:#}");
         std::process::exit(1);
+    }
+}
+
+/// Wayland + software renderer can stop repainting (Slint #7663): clicks land but
+/// button chrome never redraws. Prefer FemtoVG unless the user already chose a backend.
+fn prefer_responsive_linux_backend() {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("SLINT_BACKEND").is_none() {
+            // SAFETY: called once before the Slint/winit event loop starts.
+            unsafe {
+                std::env::set_var("SLINT_BACKEND", "winit-femtovg");
+            }
+        }
     }
 }
