@@ -6,6 +6,7 @@ mod viewer_status;
 mod navigation;
 mod audio_mix;
 mod export_form;
+mod export_destination;
 mod media_selection;
 mod media_import;
 
@@ -214,6 +215,7 @@ struct AppState {
     export_rx: Option<Receiver<ExportProgress>>,
     export_cancel: Arc<AtomicBool>,
     export_running: bool,
+    export_form: export_form::State,
     export_jobs: Vec<ExportJob>,
     export_workers: Vec<std::thread::JoinHandle<()>>,
     export_job_id: Option<i32>,
@@ -378,6 +380,7 @@ impl AppState {
             export_rx: None,
             export_cancel: Arc::new(AtomicBool::new(false)),
             export_running: false,
+            export_form: export_form::State::default(),
             export_jobs: Vec::new(),
             export_workers: Vec::new(),
             export_job_id: None,
@@ -1006,7 +1009,7 @@ fn on_key(
         }
         return;
     }
-    if ui.get_active_panel() == 2
+    if focused_panel(ui) == 2
         && !ctrl
         && !alt
         && !shift
@@ -1019,11 +1022,11 @@ fn on_key(
         }
         return;
     }
-    if ui.get_active_panel() == 0 && key == "return" && !ctrl && !alt {
+    if focused_panel(ui) == 0 && key == "return" && !ctrl && !alt {
         on_command(ui, state, "insert");
         return;
     }
-    if state.borrow().preferences.vim_navigation && ui.get_active_panel() == 3 && !ctrl && !alt {
+    if state.borrow().preferences.vim_navigation && focused_panel(ui) == 3 && !ctrl && !alt {
         let action = match key.to_ascii_lowercase().as_str() {
             "h" => Some(if shift {
                 "step-back-second"
@@ -1096,9 +1099,13 @@ fn action_enabled(ui: &AppWindow, state: &AppState, id: &str) -> bool {
     match id {
         "undo" => return state.editor.can_undo(),
         "redo" => return state.editor.can_redo(),
+        "toggle-panel-expand" => return ui.get_page() == 0,
+        "reset-motion" | "reset-opacity" | "reset-grade" => {
+            return clip_adjustment_target(&state.editor, false).is_ok();
+        }
         _ => {}
     }
-    if viewer_action(id) && ui.get_active_panel() == 0 {
+    if viewer_action(id) && focused_panel(ui) == 0 {
         return state
             .editor
             .selected_media
@@ -1132,7 +1139,7 @@ fn sync_commands(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     state.borrow_mut().palette_query = Some(query.clone());
     let rows = {
         let current = state.borrow();
-        let source = ui.get_active_panel() == 0;
+        let source = focused_panel(ui) == 0;
         let profile = current.editor.project.shortcut_profile;
         ACTIONS
             .iter()
@@ -1301,6 +1308,7 @@ fn read_layout(ui: &AppWindow) -> Layout {
 }
 
 fn apply_layout(ui: &AppWindow, layout: &Layout) {
+    ui.set_expanded_panel(-1);
     ui.set_upper_ratio(layout.upper_ratio.clamp(0.2, 0.8));
     // The UI clamps displayed widths to the current viewport. Keep the stored
     // widths so a layout made on a wide screen survives save and restore.
@@ -1312,7 +1320,17 @@ fn apply_layout(ui: &AppWindow, layout: &Layout) {
     ui.set_page(0);
 }
 
+fn focused_panel(ui: &AppWindow) -> i32 {
+    match ui.get_expanded_panel() {
+        panel @ (1 | 3) => panel,
+        _ => ui.get_active_panel() }
+}
+
 fn focus_panel(ui: &AppWindow, panel: i32) {
+    // Explicit pane shortcuts reveal their destination before moving focus.
+    if ui.get_expanded_panel() >= 0 && ui.get_expanded_panel() != panel {
+        ui.set_expanded_panel(-1);
+    }
     ui.set_page(0);
     if (panel == 0 && ui.get_workspace() == 2)
         || ((panel == 1 || panel == 4) && ui.get_workspace() == 1)
@@ -1418,6 +1436,9 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
     // The update function exits after launching its helper. Keep the modal up
     // until it returns so no edits can race that exit after the unsaved guard.
     if state.borrow().update_applying { return; }
+    if matches!(command, "export-form-changed" | "browse-export" | "choose-export-folder"
+        | "render" | "add-to-queue" | "render-queue" | "preset-high" | "preset-medium"
+        | "preset-fast" | "preset-compact" | "preset-match") && export_form::guard(ui, state) { return; }
     if matches!(command, "zoom-in" | "zoom-out" | "zoom-fit") {
         state.borrow().waveform_engine.set_busy(true);
         state.borrow().filmstrips.set_busy(true);
@@ -1441,7 +1462,7 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
         on_source_command(ui, state, action);
         return;
     }
-    if viewer_action(command) && ui.get_active_panel() == 0 {
+    if viewer_action(command) && focused_panel(ui) == 0 {
         on_source_command(ui, state, command);
         return;
     }
@@ -1484,13 +1505,29 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
             "track-up" => editor.nudge_selected(0, -1, links),
             "track-down" => editor.nudge_selected(0, 1, links),
             _ => Ok(()) });
-        ui.set_active_panel(3);
+        focus_panel(ui, 3);
         reveal_primary_clip(state);
         full_sync(ui, state);
         reveal_track(ui, state, None);
         return;
     }
     let mapped = match command {
+        "toggle-panel-expand" => {
+            if ui.get_page() != 0 { return; }
+            let expanded = ui.get_expanded_panel();
+            if matches!(expanded, 1 | 3) {
+                ui.set_expanded_panel(-1);
+                ui.invoke_focus_pane(expanded);
+                set_status(state, "Workspace restored".into());
+            } else {
+                let panel = if focused_panel(ui) == 1 { 1 } else { 3 };
+                focus_panel(ui, panel);
+                ui.set_expanded_panel(panel);
+                set_status(state, if panel == 1 { "Program expanded" } else { "Timeline expanded" }.into());
+            }
+            full_sync(ui, state);
+            return;
+        }
         "focus-controls" => { ui.invoke_focus_controls(); return; }
         "focus-menu" => { ui.invoke_focus_menu(); return; }
         "commands" => {
@@ -1524,6 +1561,7 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
             return;
         }
         "workspace-edit" | "workspace-media" | "workspace-color" | "workspace-audio" => {
+            ui.set_expanded_panel(-1);
             ui.set_page(0);
             ui.set_workspace(match command {
                 "workspace-media" => 1,
@@ -1549,11 +1587,11 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
                 _ => &[0, 1, 2, 3, 4] };
             let current = visible
                 .iter()
-                .position(|panel| *panel == ui.get_active_panel())
+                .position(|panel| *panel == focused_panel(ui))
                 .unwrap_or(0) as i32;
             let index = (current + if command == "panel-next" { 1 } else { -1 })
                 .rem_euclid(visible.len() as i32);
-            ui.invoke_focus_pane(visible[index as usize]);
+            focus_panel(ui, visible[index as usize]);
             return;
         }
         "panel-source" | "panel-program" | "panel-project" | "panel-timeline"
@@ -1707,7 +1745,25 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
             return;
         }
         "browse-export" => {
-            browse_export(ui);
+            export_form::browse(ui, state, false);
+            return;
+        }
+        "choose-export-folder" => {
+            export_form::browse(ui, state, true);
+            return;
+        }
+        "export-form-changed" => {
+            export_form::changed(ui, state);
+            return;
+        }
+        "open-export-folder" => {
+            export_form::open(ui, state, export_destination::OpenAction::Folder, None);
+            return;
+        }
+        "open-last-export" | "reveal-last-export" => {
+            export_form::open(ui, state, if command == "open-last-export" {
+                export_destination::OpenAction::File
+            } else { export_destination::OpenAction::Reveal }, None);
             return;
         }
         "render" => {
@@ -1724,6 +1780,7 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
             return;
         }
         "clear-completed" => {
+            if export_form::guard(ui, state) { return; }
             state
                 .borrow_mut()
                 .export_jobs
@@ -1733,6 +1790,7 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
         }
         "cancel-render" => {
             state.borrow_mut().queue_active = false;
+            if export_form::cancel_check(ui, state) { return; }
             state.borrow().export_cancel.store(true, Ordering::Relaxed);
             if state.borrow().export_running {
                 ui.set_export_cancelling(true);
@@ -1863,24 +1921,28 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
             ui.set_export_crf(18.0);
             ui.set_export_speed(0);
             ui.set_read_crf(SharedString::from("18"));
+            export_form::changed(ui, state);
             return;
         }
         "preset-medium" => {
             ui.set_export_crf(21.0);
             ui.set_export_speed(0);
             ui.set_read_crf(SharedString::from("21"));
+            export_form::changed(ui, state);
             return;
         }
         "preset-fast" => {
             ui.set_export_crf(21.0);
             ui.set_export_speed(1);
             ui.set_read_crf(SharedString::from("21"));
+            export_form::changed(ui, state);
             return;
         }
         "preset-compact" => {
             ui.set_export_crf(23.0);
             ui.set_export_speed(2);
             ui.set_read_crf(SharedString::from("23"));
+            export_form::changed(ui, state);
             return;
         }
         "preset-match" => {
@@ -1897,19 +1959,28 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
             run_command(ui, state, Command::Escape);
             return;
         }
-        "reset-grade" => {
-            {
-                let mut guard = state.borrow_mut();
-                if let Some(id) = guard.editor.primary_clip() {
-                    let _ = guard.editor.edit("reset-grade", |project| {
-                        if let Some(clip) = project.clip_mut(id) {
-                            clip.grade = crate::color::Grade::default();
+        "reset-motion" | "reset-opacity" | "reset-grade" => {
+            let kind = match command {
+                "reset-motion" => "reset-motion",
+                "reset-opacity" => "reset-opacity",
+                _ => "reset-grade" };
+            act(state, |editor| {
+                let id = clip_adjustment_target(editor, false)?;
+                editor.edit(kind, |project| {
+                    if let Some(clip) = project.clip_mut(id) {
+                        match kind {
+                            "reset-motion" => {
+                                clip.pos_x = 0.0;
+                                clip.pos_y = 0.0;
+                                clip.scale = 1.0;
+                            }
+                            "reset-opacity" => clip.opacity = 1.0,
+                            _ => clip.grade = Grade::default(),
                         }
-                        Ok::<(), String>(())
-                    });
-                }
-            }
-            note(state);
+                    }
+                    Ok(())
+                })
+            });
             full_sync(ui, state);
             return;
         }
@@ -2053,11 +2124,11 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             Some(())
         }
         Command::ZoomIn => {
-            state.borrow_mut().editor.zoom_by(1.25);
+            zoom_timeline(&mut state.borrow_mut(), 1.25, None);
             Some(())
         }
         Command::ZoomOut => {
-            state.borrow_mut().editor.zoom_by(0.8);
+            zoom_timeline(&mut state.borrow_mut(), 0.8, None);
             Some(())
         }
         Command::ZoomFit => {
@@ -2094,25 +2165,49 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             Some(())
         }
         Command::Escape => {
+            let dismissing_popup = ui.get_modal_open() || ui.get_open_menu() != 0
+                || ui.get_show_command_palette();
             ui.set_show_dialog(false);
             ui.set_show_prefs(false);
+            ui.set_show_about(false);
             ui.set_show_import_mode(false);
             ui.set_show_import_report(false);
             ui.set_show_export_details(false);
             ui.set_show_update_agree(false);
             ui.set_open_menu(0);
             ui.set_show_command_palette(false);
-            ui.set_media_drag_active(false);
             state.borrow_mut().timeline_import_path = None;
             clear_update_agree(state);
-            let mut state = state.borrow_mut();
-            if state.pointer.down && state.pointer.seeking {
-                state.editor.project.sequence.playhead = state.pointer.origin_frame;
-            } else {
-                state.editor.cancel_gesture();
+            if dismissing_popup {
+                full_sync(ui, state);
+                return;
             }
-            state.pointer = Pointer::default();
-            state.media_drag_origin = None;
+            let cancelled_timeline = cancel_timeline_pointer(&mut state.borrow_mut());
+            let cancelled_media = state.borrow_mut().media_drag_origin.take().is_some()
+                || ui.get_media_drag_active();
+            ui.set_media_drag_active(false);
+            ui.set_media_drop_valid(false);
+            if cancelled_media {
+                set_status(state, "Media drag cancelled".into());
+            }
+            let stopped_viewer = state.borrow_mut().viewer_last.take().is_some();
+            if stopped_viewer {
+                set_status(state, "Viewer drag stopped".into());
+            }
+            if cancelled_timeline || cancelled_media || stopped_viewer {
+                full_sync(ui, state);
+                return;
+            }
+            let expanded = ui.get_expanded_panel();
+            if matches!(expanded, 1 | 3) {
+                ui.set_expanded_panel(-1);
+                ui.invoke_focus_pane(expanded);
+                set_status(state, "Workspace restored".into());
+                full_sync(ui, state);
+                return;
+            }
+            let mut state = state.borrow_mut();
+            state.editor.cancel_gesture();
             state.editor.armed = None;
             state.editor.tool = Tool::Select;
             state.editor.clear_selection();
@@ -2242,7 +2337,7 @@ fn offer_sequence_match(
     ui.set_show_command_palette(false);
     ui.set_show_about(false);
     ui.set_show_sequence_match(true);
-    ui.invoke_focus_pane(ui.get_active_panel());
+    ui.invoke_focus_pane(focused_panel(ui));
     true
 }
 
@@ -2306,7 +2401,7 @@ fn finish_sequence_match(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>
         }
         Err(error) => set_status(state, error) }
     set_preview_default(ui, state);
-    ui.invoke_focus_pane(3);
+    focus_panel(ui, 3);
     full_sync(ui, state);
 }
 
@@ -2401,12 +2496,21 @@ fn set_speed(state: &Rc<std::cell::RefCell<AppState>>, speed: f64) {
     }
 }
 
+fn clip_adjustment_target(editor: &timeline::Editor, audio: bool) -> Result<u64, String> {
+    let primary = editor.primary_clip().ok_or("Select a clip")?;
+    let target = if audio { editor.linked_audio(primary).unwrap_or(primary) } else { primary };
+    timeline::ops::validate_unlocked(&editor.project, &[target])?;
+    Ok(target)
+}
+
 fn on_adjust(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, field: &str, value: f32) {
     if state.borrow().syncing {
         return;
     }
     if field == "crf" {
+        if export_form::guard(ui, state) { return; }
         ui.set_read_crf(SharedString::from(format!("{}", value.round() as i32)));
+        export_form::changed(ui, state);
         return;
     }
     if field == "trans-dur" {
@@ -2430,6 +2534,12 @@ fn on_adjust(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, field: &s
             .max(1.0);
         ui.set_read_seconds(SharedString::from(format!("{:.2}", value as f64 / fps)));
         if audio { audio_mix::note_audio(state); } else { note(state); }
+        return;
+    }
+    let target = clip_adjustment_target(&state.borrow().editor, field == "volume");
+    if let Err(error) = target {
+        set_status(state, error);
+        full_sync(ui, state);
         return;
     }
     state.borrow_mut().editor.adjust(field, value);
@@ -2485,22 +2595,23 @@ fn on_pick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, kind: &str,
     let audio_control = matches!(kind, "mute" | "solo") && state.borrow().editor.project.sequence.tracks
         .get(id as usize).is_some_and(|track| track.kind == TrackKind::Audio);
     match kind {
+        "queue-open" | "queue-reveal" => {
+            export_form::open(ui, state, if kind == "queue-open" { export_destination::OpenAction::File }
+                else { export_destination::OpenAction::Reveal }, Some(id));
+            return;
+        }
         "queue-remove" => {
+            if export_form::guard(ui, state) { return; }
             state
                 .borrow_mut()
                 .export_jobs
                 .retain(|job| job.id != id || job.status == JobStatus::Rendering);
             sync_queue(ui, state);
+            export_form::changed(ui, state);
             return;
         }
         "queue-retry" => {
-            if let Some(job) = state.borrow_mut().export_jobs.iter_mut().find(|job| {
-                job.id == id && matches!(job.status, JobStatus::Failed | JobStatus::Cancelled)
-            }) {
-                job.status = JobStatus::Pending;
-                job.message = "Queued".into();
-            }
-            sync_queue(ui, state);
+            export_form::submit_job(ui, state, id, true);
             return;
         }
         "media" => {
@@ -2654,6 +2765,22 @@ fn sync_edit_feedback(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) 
     current.edit_hover_selection = current.editor.selected_clips.clone();
 }
 
+fn cancel_timeline_pointer(state: &mut AppState) -> bool {
+    if !state.pointer.down && !state.editor.gesture_active() {
+        return false;
+    }
+    let seeking = state.pointer.down && state.pointer.seeking;
+    if seeking {
+        state.editor.project.sequence.playhead = state.pointer.origin_frame;
+    }
+    state.editor.cancel_gesture();
+    state.pointer = Pointer::default();
+    state.preview_min_token = state.preview_token.saturating_add(1);
+    state.status = if seeking { "Timeline scrub cancelled" } else { "Timeline edit cancelled" }.into();
+    note_borrowed(state);
+    true
+}
+
 fn on_timeline(
     ui: &AppWindow,
     state: &Rc<std::cell::RefCell<AppState>>,
@@ -2672,17 +2799,7 @@ fn on_timeline(
         y
     };
     if phase == 3 {
-        let mut current = state.borrow_mut();
-        if current.pointer.down && current.pointer.seeking {
-            current.editor.project.sequence.playhead = current.pointer.origin_frame;
-        } else {
-            current.editor.cancel_gesture();
-            current.edit_gen = current.edit_gen.wrapping_add(1);
-            current.picture_gen = current.picture_gen.wrapping_add(1);
-        }
-        current.pointer = Pointer::default();
-        current.shown_frame = -1;
-        drop(current);
+        cancel_timeline_pointer(&mut state.borrow_mut());
         full_sync(ui, state);
         return;
     }
@@ -3022,8 +3139,13 @@ fn on_media_drag(
         return;
     }
     if phase == 3 {
-        state.borrow_mut().media_drag_origin = None;
+        let cancelled = state.borrow_mut().media_drag_origin.take().is_some();
         ui.set_media_drag_active(false);
+        ui.set_media_drop_valid(false);
+        if cancelled {
+            set_status(state, "Media drag cancelled".into());
+            ui.set_status_text(state.borrow().status.clone().into());
+        }
         return;
     }
     let Some(origin) = state.borrow().media_drag_origin else {
@@ -3125,10 +3247,25 @@ fn on_media_drag(
             act(state, |editor| {
                 editor.insert_media_range_at(id as u64, frame, false, origin.range)
             });
-            ui.invoke_focus_pane(3);
+            focus_panel(ui, 3);
             full_sync(ui, state);
         }
     }
+}
+
+fn zoom_timeline(state: &mut AppState, factor: f64, anchor_x: Option<f64>) {
+    let sequence = &state.editor.project.sequence;
+    let width = state.timeline_w.max(1.0) as f64;
+    let x = anchor_x.unwrap_or_else(|| {
+        let playhead_x = (sequence.playhead as f64 - sequence.scroll) * sequence.zoom;
+        if (0.0..=width).contains(&playhead_x) { playhead_x } else { width / 2.0 }
+    }).clamp(0.0, width);
+    // Keep the fractional frame under the anchor; hit-testing rounds to a frame
+    // and would accumulate a visible drift on every wheel notch.
+    let frame = sequence.scroll + x / sequence.zoom;
+    state.editor.zoom_by(factor);
+    state.editor.project.sequence.scroll = (frame - x / state.editor.project.sequence.zoom).max(0.0);
+    clamp_scroll(state);
 }
 
 fn on_wheel(
@@ -3142,18 +3279,14 @@ fn on_wheel(
         return;
     }
     state.borrow().waveform_engine.set_busy(true);
-        state.borrow().filmstrips.set_busy(true);
+    state.borrow().filmstrips.set_busy(true);
     state.borrow().optimized_cache.set_busy(true);
     state.borrow_mut().background_idle_after = Instant::now() + std::time::Duration::from_secs(2);
     {
         let mut state = state.borrow_mut();
-        let px = state.editor.project.sequence.zoom as f32;
         if ctrl {
-            let before = frame_at(x, state.editor.project.sequence.scroll as f32, px);
             let factor = if delta > 0.0 { 1.12 } else { 1.0 / 1.12 };
-            state.editor.zoom_by(factor);
-            let px = state.editor.project.sequence.zoom as f32;
-            state.editor.project.sequence.scroll = (before as f32 - x / px).max(0.0) as f64;
+            zoom_timeline(&mut state, factor, Some(x as f64));
         } else {
             state.editor.project.sequence.scroll =
                 (state.editor.project.sequence.scroll - delta as f64 * 0.35).max(0.0);
@@ -3269,9 +3402,9 @@ fn on_viewer(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, phase: i3
 }
 
 fn clamp_scroll(state: &mut AppState) {
-    let px = state.editor.project.sequence.zoom as f32;
-    let content = state.editor.project.sequence.duration_frames().max(1) as f32 * px + 240.0;
-    let max_scroll = ((content - state.timeline_w) / px).max(0.0) as f64;
+    let px = state.editor.project.sequence.zoom;
+    let content = state.editor.project.sequence.duration_frames().max(1) as f64 * px + 240.0;
+    let max_scroll = ((content - state.timeline_w as f64) / px).max(0.0);
     if state.editor.project.sequence.scroll > max_scroll {
         state.editor.project.sequence.scroll = max_scroll;
     }
@@ -3338,6 +3471,7 @@ fn take_export_progress(rx: &Receiver<ExportProgress>) -> Option<ExportProgress>
 }
 
 fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    export_form::pump(ui, state);
     audio_mix::sync_meters(ui, state);
     {
         let mut current = state.borrow_mut();
@@ -3530,6 +3664,7 @@ fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
         ui.set_export_cancelling(cancelling);
         let message = progress.error.as_deref().unwrap_or(&progress.message);
         ui.set_export_message(if cancelling { "Cancelling…".into() } else { SharedString::from(message) });
+        let mut completed = None;
         {
             let mut current = state.borrow_mut();
             let job_id = current.export_job_id;
@@ -3542,6 +3677,7 @@ fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
                 job.message = message.to_string();
                 if progress.done {
                     job.status = export_terminal_status(progress.error.as_deref());
+                    completed = Some((job.settings.output.clone(), job.status));
                 }
             }
             if progress.done {
@@ -3559,6 +3695,7 @@ fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
         }
         sync_queue(ui, state);
         if progress.done {
+            if let Some((path, status)) = completed { export_form::completed(ui, state, path, status); }
             full_sync(ui, state);
             launch_next_export(ui, state);
         }
@@ -4319,6 +4456,8 @@ fn on_source_scrub(
         let mut current = state.borrow_mut();
         if let Some(frame) = current.source.scrub_origin.take() {
             current.source.seek(frame);
+            current.status = "Source scrub cancelled".into();
+            ui.set_status_text(current.status.clone().into());
         }
     } else if state.borrow().source.scrub_origin.is_some() {
         let mut current = state.borrow_mut();
@@ -4809,7 +4948,7 @@ impl SyncSnap {
                     keys: (*keys).into(),
                     action: (*action).into() })
                 .collect(),
-            export_busy: state.export_running }
+            export_busy: export_form::busy(state) }
     }
 }
 
@@ -6049,6 +6188,15 @@ fn handle_dropped_files(
 
 fn import_paths(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, paths: Vec<PathBuf>) {
     if paths.is_empty() { return; }
+    {
+        let mut current = state.borrow_mut();
+        current.query.clear();
+        current.filter_kind = 0;
+    }
+    ui.set_query(SharedString::default());
+    ui.set_bin_filter(0);
+    focus_panel(ui, 2);
+    sync_imported_media(ui, state);
     let mut current = state.borrow_mut();
     let mut known: HashSet<_> = current.editor.project.media.iter()
         .map(|media| media_import::path_key(&media.path)).collect();
@@ -6291,6 +6439,10 @@ fn pump_import(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     let changed = flush_import_batch(&mut current);
     current.import_last_refresh = Instant::now();
     update_import_status(&mut current, done);
+    let report = if done && current.pending_imports.is_empty() && !current.relinking {
+        media_import::failure_report(current.import_count, current.import_errors,
+            current.import_cancel.load(Ordering::Acquire), &current.import_last_error)
+    } else { None };
     if done {
         current.import_rx = None;
         current.import_job = None;
@@ -6303,24 +6455,11 @@ fn pump_import(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     drop(current);
     if relinked { full_sync(ui, state); }
     else if changed { sync_imported_media(ui, state); }
-}
-
-fn browse_export(ui: &AppWindow) {
-    let name = if ui.get_export_path().is_empty() {
-        "sequence.mp4".into()
-    } else {
-        ui.get_export_path().to_string()
-    };
-    let Some(path) = rfd::FileDialog::new()
-        .set_title("Export MP4")
-        .set_file_name(&name)
-        .add_filter("MP4", &["mp4"])
-        .save_file()
-    else {
-        return;
-    };
-    let path = ensure_extension(path, "mp4");
-    ui.set_export_path(SharedString::from(path.display().to_string()));
+    if let Some(report) = report {
+        state.borrow_mut().import_report_text = report.clone();
+        ui.set_import_report_text(report.into());
+        ui.set_show_import_report(true);
+    }
 }
 
 fn prepare_export(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
@@ -6355,6 +6494,10 @@ fn sync_queue(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
                 name: SharedString::from(job.project.name.clone()),
                 output: SharedString::from(job.settings.output.display().to_string()),
                 status: SharedString::from(job.message.clone()),
+                state_label: match job.status {
+                    JobStatus::Pending => "Queued", JobStatus::Rendering => "Exporting",
+                    JobStatus::Complete => "Complete", JobStatus::Failed => "Failed", JobStatus::Cancelled => "Cancelled",
+                }.into(),
                 removable: job.status != JobStatus::Rendering,
                 retryable: matches!(job.status, JobStatus::Failed | JobStatus::Cancelled),
                 complete: job.status == JobStatus::Complete })
@@ -6374,106 +6517,37 @@ fn sync_queue(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     }));
 }
 
-fn enqueue_export(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) -> bool {
-    if ui.get_export_path().trim().is_empty() {
-        ui.set_export_message(SharedString::from("Choose an output file"));
-        return false;
-    }
-    let (width, height) = match parse_export_dimensions(
-        &ui.get_export_width(),
-        &ui.get_export_height(),
-    ) {
-        Ok(dimensions) => dimensions,
-        Err(error) => {
-            set_status(state, error.clone());
-            ui.set_export_message(error.into());
-            full_sync(ui, state);
-            return false;
-        }
-    };
-    let frame_rate = match export_form::rate(ui) {
-        Ok(rate) => rate,
-        Err(error) => { ui.set_export_message(error.into()); return false; }
-    };
-    export_form::remember(ui, state);
-    save_preferences(state);
-    let settings = ExportSettings {
-        force_composite: false,
-        speed: match ui.get_export_speed() {
-            1 => RenderSpeed::Fast,
-            2 => RenderSpeed::Compact,
-            _ => RenderSpeed::Balanced },
-        encoder: match ui.get_export_encoder() {
-            1 => EncoderPreference::Cpu,
-            2 => EncoderPreference::Hardware,
-            _ => EncoderPreference::Auto },
-        width,
-        height,
-        frame_rate,
-        crf: ui.get_export_crf().round().clamp(14.0, 28.0) as u8,
-        use_in_out: ui.get_export_inout(),
-        output: ensure_extension(PathBuf::from(ui.get_export_path().as_str()), "mp4") };
-    let project = state.borrow().editor.project.clone();
-    if let Err(error) = export_range(&project, &settings) {
-        set_status(state, error.clone());
-        ui.set_export_message(SharedString::from(error));
-        full_sync(ui, state);
-        return false;
-    }
-    {
-        let mut current = state.borrow_mut();
-        if current.export_jobs.iter().any(|job| {
-            matches!(job.status, JobStatus::Pending | JobStatus::Rendering)
-                && job.settings.output == settings.output
-        }) {
-            current.status =
-                "An active job already uses this output file. Choose a different name.".into();
-            ui.set_export_message(SharedString::from(current.status.clone()));
-            return false;
-        }
-        let id = current.next_export_id;
-        current.next_export_id += 1;
-        current.export_jobs.push(ExportJob {
-            id,
-            project,
-            settings,
-            status: JobStatus::Pending,
-            message: "Queued".into() });
-        current.status = "Export added to queue".into();
-    }
-    full_sync(ui, state);
-    true
+fn enqueue_export(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    export_form::submit(ui, state, false);
 }
 
 fn start_export(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
-    if state.borrow().export_running {
-        return;
-    }
-    if enqueue_export(ui, state) {
-        state.borrow_mut().queue_active = true;
-        launch_next_export(ui, state);
-    }
+    export_form::submit(ui, state, true);
 }
 
 fn launch_next_export(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
-    let job = {
+    let id = {
         let mut current = state.borrow_mut();
-        if current.export_running || !current.queue_active {
-            return;
-        }
-        let Some(job) = current
-            .export_jobs
-            .iter_mut()
-            .find(|job| job.status == JobStatus::Pending)
-        else {
-            current.queue_active = false;
-            return;
-        };
+        if export_form::busy(&current) || !current.queue_active { return; }
+        let id = current.export_jobs.iter().find(|job| job.status == JobStatus::Pending).map(|job| job.id);
+        if id.is_none() { current.queue_active = false; }
+        id
+    };
+    if let Some(id) = id { export_form::submit_job(ui, state, id, false); }
+}
+
+fn launch_export_job(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, id: i32) {
+    stop_play(state);
+    let (project, settings) = {
+        let mut current = state.borrow_mut();
+        if export_form::busy(&current) { return; }
+        let Some(job) = current.export_jobs.iter_mut().find(|job| job.id == id && job.status == JobStatus::Pending) else { return; };
         job.status = JobStatus::Rendering;
         job.message = "Starting".into();
-        (job.id, job.project.clone(), job.settings.clone())
+        (job.project.clone(), job.settings.clone())
     };
-    let (id, project, settings) = job;
+    export_form::freeze(ui, state);
+    ui.set_export_active_path(settings.output.display().to_string().into());
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel();
     {
@@ -6485,6 +6559,7 @@ fn launch_next_export(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) 
         current.status = format!("Rendering {}", project.name);
     }
     ui.set_export_busy(true);
+    ui.set_export_checking(false);
     ui.set_export_cancelling(false);
     state.borrow_mut().export_eta_at = None;
     ui.set_export_eta("".into());

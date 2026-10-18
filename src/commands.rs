@@ -57,7 +57,7 @@ actions![
     (
         "export-view",
         "File: Export sequence",
-        "ctrl+e",
+        "ctrl+m",
         "ctrl+e",
         Clips
     ),
@@ -270,7 +270,7 @@ actions![
     (
         "clear-io",
         "Sequence: Clear in and out",
-        "alt+x",
+        "ctrl+shift+x",
         "alt+x",
         Always
     ),
@@ -305,7 +305,7 @@ actions![
     (
         "zoom-fit",
         "Timeline: Fit sequence",
-        "ctrl+0",
+        "\\",
         "ctrl+0",
         Always
     ),
@@ -352,28 +352,28 @@ actions![
     (
         "panel-source",
         "Panel: Focus Source",
-        "shift+1",
+        "shift+2",
         "shift+1",
         Always
     ),
     (
         "panel-program",
         "Panel: Focus Program",
-        "shift+2",
+        "shift+4",
         "shift+2",
         Always
     ),
     (
         "panel-project",
         "Panel: Focus Project",
-        "shift+3",
+        "shift+1",
         "shift+3",
         Always
     ),
     (
         "panel-timeline",
         "Panel: Focus Timeline",
-        "shift+4",
+        "shift+3",
         "shift+4",
         Always
     ),
@@ -382,6 +382,13 @@ actions![
         "Panel: Focus Properties",
         "shift+5",
         "shift+5",
+        Always
+    ),
+    (
+        "toggle-panel-expand",
+        "Panel: Expand Program / Timeline",
+        "`",
+        "",
         Always
     ),
     (
@@ -423,6 +430,20 @@ actions![
     (
         "reset-grade",
         "Color: Reset selected clip grade",
+        "",
+        "",
+        Selection
+    ),
+    (
+        "reset-motion",
+        "Clip: Reset selected clip motion",
+        "",
+        "",
+        Selection
+    ),
+    (
+        "reset-opacity",
+        "Clip: Reset selected clip opacity",
         "",
         "",
         Selection
@@ -491,23 +512,39 @@ pub fn display_binding(binding: &str) -> String {
     if binding.is_empty() {
         return "Unassigned".into();
     }
-    binding
-        .split('+')
-        .map(|part| match part {
-            "ctrl" => "Ctrl".into(),
-            "alt" => "Alt".into(),
-            "shift" => "Shift".into(),
-            "left" => "←".into(),
-            "right" => "→".into(),
-            "up" => "↑".into(),
-            "down" => "↓".into(),
-            "space" => "Space".into(),
-            "delete" => "Delete".into(),
-            "backspace" => "Backspace".into(),
-            "escape" => "Esc".into(),
-            "tab" => "Tab".into(),
-            other => other.to_uppercase() })
-        .collect::<Vec<String>>()
-        .join("+")
+    // Only split modifier prefixes: the key itself can be "+", including
+    // saved custom chords such as "ctrl++". Keep the stored chord unchanged.
+    let mut parts = Vec::new();
+    let mut key = binding;
+    while let Some((modifier, rest)) = key.split_once('+') {
+        let label = match modifier {
+            "ctrl" => "Ctrl",
+            "alt" => "Alt",
+            "shift" => "Shift",
+            _ => break };
+        parts.push(label.to_string());
+        key = rest;
+    }
+    parts.push(match key {
+        "left" => "←".into(),
+        "right" => "→".into(),
+        "up" => "↑".into(),
+        "down" => "↓".into(),
+        "space" => "Space".into(),
+        "delete" => "Delete".into(),
+        "backspace" => "Backspace".into(),
+        "escape" => "Esc".into(),
+        "tab" => "Tab".into(),
+        "return" => "Enter".into(),
+        "home" => "Home".into(),
+        "end" => "End".into(),
+        "pageup" => "Page Up".into(),
+        "pagedown" => "Page Down".into(),
+        "insert" => "Insert".into(),
+        "+" => "Plus".into(),
+        "\\" => "Backslash".into(),
+        "`" => "Backtick".into(),
+        other => other.to_uppercase() });
+    parts.join("+")
 }
 

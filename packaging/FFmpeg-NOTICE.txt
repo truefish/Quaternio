@@ -1,0 +1,34 @@
+Quaternio bundles FFmpeg and ffprobe as separate executable programs.
+FFmpeg project and source: https://ffmpeg.org/ and https://git.ffmpeg.org/ffmpeg.git
+
+See provenance.json for the exact download URLs, archive SHA256 digests,
+upstream version/source information, and hashes of the packaged binaries.
+The *-version.txt, *-configuration.txt and *-license.txt files are captured
+from BOTH packaged programs on the native release runner. They describe
+the actual build, including enabled external libraries and license version.
+Full GPL v2/v3 texts are included in licenses/ (from official FFmpeg n7.1.1
+COPYING.GPLv2 and COPYING.GPLv3). The applicable version is reported by -L.
+The BtbN archive's LICENSE.txt is also preserved when supplied.
+Quaternio's own LICENSE does not replace third-party licenses.
+
+These are checksum-pinned third-party binaries, not reproducible source builds.
+A digest fixes the accepted archive bytes; it does not guarantee continued
+hosting, source availability, or byte-identical rebuilds. macOS ad-hoc signing
+can change binary bytes; provenance records the final packaged binary hashes.
+
+Builder/source references:
+BtbN: https://github.com/BtbN/FFmpeg-Builds
+BtbN dependencies/build recipes: https://github.com/BtbN/FFmpeg-Builds/tree/master/scripts.d
+OSXExperts: https://www.osxexperts.net/ (build instructions and source links)
+
+These builder links are informational and may change. They are NOT an archive
+of exact corresponding source for these binaries and their linked dependencies,
+and this notice is NOT a written source offer. Exact dependency source revisions,
+patches, and a complete corresponding source bundle are not available in this
+repository and have not been independently established for these builds.
+Native CI workers download and inspect these binaries; they do not build FFmpeg
+from source and do not establish source-build reproducibility.
+The distribution maintainer still
+needs to obtain, retain, and provide corresponding source, patches, build scripts,
+and dependency licenses as required for the selected builds. Including these
+notices alone does not establish complete license compliance.

@@ -3,7 +3,7 @@ resolver = "2"
 
 [package]
 name = "quaternio"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 edition = "2021"
 description = "Quaternio, a native desktop editor for media, cut, grade, and export."
 license = "MIT"
@@ -29,4 +29,5 @@ flate2 = "1"
 tar = "0.4"
 
 [build-dependencies]
+embed-resource = "3.0"
 slint-build = "=1.8.0"

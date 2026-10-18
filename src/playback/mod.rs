@@ -13,7 +13,7 @@ mod thumbnails;
 pub use audio::{mix_range, Pcm};
 pub use meters::MeterSnapshot;
 pub use composite::{composite, FrameSource, ImageBuf};
-pub use decode::{find_ffmpeg, parse_probe, probe_path, probe_path_cancellable, CachingSource};
+pub use decode::{find_ffmpeg, find_ffprobe, parse_probe, probe_path, probe_path_cancellable, CachingSource};
 pub use thumbnails::{Thumbnail, ThumbnailEngine};
 
 use std::collections::{HashMap, HashSet, VecDeque};

@@ -6,6 +6,21 @@
 
 A free, open-source video editor written in Rust. Beta builds available for Windows, Linux, and macOS.
 
+**[Download Quaternio](https://github.com/truefish/Quaternio/releases)**
+
+## Screenshots
+
+Sample project shown.
+
+**Edit:** browse media, arrange clips, and adjust the picture.
+
+![Quaternio editing workspace with source and program previews, a multitrack timeline, and clip controls](docs/screenshots/editing-workspace.png)
+
+**Export:** choose the file name, output folder, quality, and encoding method.
+
+![Quaternio export workspace with a sequence preview, destination fields, video settings, and export queue](docs/screenshots/export-workspace.png)
+
+Sample imagery: [NASA](https://www.nasa.gov/image-article/sunrise-over-pacific-2/) and [NASA/Matthew Dominick](https://www.nasa.gov/image-article/sunrise-begins/).
 
 ## Versions and project files
 
@@ -82,9 +97,9 @@ sudo apt install libxcb-shape0 libxcb-xfixes0 libxkbcommon0 libxkbcommon-x11-0 \
 
 ### macOS
 
-This beta ships **Apple Silicon (`arm64`)** builds (`Quaternio-macOS-arm64-v….tar.gz`). Intel macOS packages are not included in this beta.
+Choose `Quaternio-macOS-arm64-v….tar.gz` for Apple Silicon or `Quaternio-macOS-x86_64-v….tar.gz` for Intel. Older releases may only include Apple Silicon builds.
 
-1. Download the arm64 archive.
+1. Download the archive for your Mac. The commands below use Apple Silicon; use your downloaded filename for Intel.
 2. Extract and enter the folder:
 
 ```bash
@@ -122,6 +137,8 @@ You need:
 
 - [Rust](https://rustup.rs/) (stable)
 - **FFmpeg** and **ffprobe** on your `PATH`, or copied next to the built binary before you run it
+
+For `cargo run` or debug builds, copy both FFmpeg tools into `target/debug/` if they are not on `PATH`. Cargo does not install them. Repeat this after `cargo clean`.
 
 ### Windows (x64)
 

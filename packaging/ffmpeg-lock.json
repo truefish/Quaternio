@@ -1,0 +1,88 @@
+{
+  "verification": "Archives hashed locally 2026-10-18 UTC; Windows/Linux match GitHub release asset digests. Intel extracted binaries also match OSXExperts published SHA256. ARM digests are locally observed HTTPS archive hashes.",
+  "targets": {
+    "windows-x86_64": {
+      "host": [
+        "Windows",
+        [
+          "amd64",
+          "x86_64"
+        ]
+      ],
+      "version": "n8.1.3-18-g46d899d7a0",
+      "source": "https://github.com/FFmpeg/FFmpeg/commit/46d899d7a0",
+      "builder": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-10-16-13-04",
+      "assets": [
+        {
+          "file": "beta3-ffmpeg.zip",
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-16-13-04/ffmpeg-n8.1.3-18-g46d899d7a0-win64-gpl-8.1.zip",
+          "sha256": "fedb8b9219cbab9dd46035067f8a85645520e7be7d919389856206e7d0c28f4a"
+        }
+      ]
+    },
+    "linux-x86_64": {
+      "host": [
+        "Linux",
+        [
+          "x86_64"
+        ]
+      ],
+      "version": "n8.1.3-18-g46d899d7a0",
+      "source": "https://github.com/FFmpeg/FFmpeg/commit/46d899d7a0",
+      "builder": "https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-10-16-13-04",
+      "assets": [
+        {
+          "file": "linux.tar.xz",
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-16-13-04/ffmpeg-n8.1.3-18-g46d899d7a0-linux64-gpl-8.1.tar.xz",
+          "sha256": "c19bd7fec94e0c56032fad4f20bf56b2847f18fbe372c758b32ed10d4dec2176"
+        }
+      ]
+    },
+    "macos-arm64": {
+      "host": [
+        "Darwin",
+        [
+          "arm64"
+        ]
+      ],
+      "version": "7.1.1",
+      "source": "https://www.osxexperts.net/ (exact source/dependency revisions not independently established)",
+      "builder": "https://www.osxexperts.net/",
+      "assets": [
+        {
+          "file": "ffmpeg-arm.zip",
+          "url": "https://www.osxexperts.net/ffmpeg711arm.zip",
+          "sha256": "59e39a5cec2e5d2307ed079c53227a9181e64b87454ed4de998349e044bfdc70"
+        },
+        {
+          "file": "ffprobe-arm.zip",
+          "url": "https://www.osxexperts.net/ffprobe711arm.zip",
+          "sha256": "e695da37c08c8fbc218ebc161ee20d5606b50f3c7e8d696cbcf01bd40fe20d7e"
+        }
+      ]
+    },
+    "macos-x86_64": {
+      "host": [
+        "Darwin",
+        [
+          "x86_64"
+        ]
+      ],
+      "version": "8.0",
+      "source": "https://www.osxexperts.net/ (exact source/dependency revisions not independently established)",
+      "builder": "https://www.osxexperts.net/",
+      "assets": [
+        {
+          "file": "ffmpeg-intel.zip",
+          "url": "https://www.osxexperts.net/ffmpeg80intel.zip",
+          "sha256": "2d24d22db78c87f394a5822867acd5c5dc5e762cd261a44bd26923f3a5af3e07"
+        },
+        {
+          "file": "ffprobe-intel.zip",
+          "url": "https://www.osxexperts.net/ffprobe80intel.zip",
+          "sha256": "0b6576104a95c1b39d4939e2df86f8f7cf1d55287ff57da48777d94605d12feb"
+        }
+      ]
+    }
+  }
+}

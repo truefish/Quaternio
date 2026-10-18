@@ -22,6 +22,14 @@ mod update;
 mod app;
 
 fn main() {
+    match export::worker::run_if_requested() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Quaternio export worker: {error}");
+            std::process::exit(1);
+        }
+    }
     match cli::run_if_requested() {
         Ok(true) => return,
         Ok(false) => {}

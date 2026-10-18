@@ -1,7 +1,7 @@
 //! Exact export PCM stays on disk. Only the current mix chunk's source windows
 //! are resident; decoding starts at the original stream origin, including AAC
 //! decoder history, and stops once the last required source window is complete.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 
 use super::*;
@@ -68,6 +68,17 @@ impl DiskAudio {
                 sample_rate: 48_000,
                 samples } }))
     }
+}
+
+// Keep only this chunk's windows, reusing immutable PCM from the previous chunk.
+// Evict first so retained PCM stays bounded by the current required windows.
+fn retain_windows(windows: &mut WindowBuffers, needed: &HashSet<(u64, i64)>) {
+    windows.retain(|id, buffers| {
+        buffers.retain(|window| {
+            needed.contains(&(*id, window.start_sample / PREVIEW_WINDOW_SAMPLES))
+        });
+        !buffers.is_empty()
+    });
 }
 
 /// Copy only selected source blocks into a compact file. Discarding a prefix
@@ -331,15 +342,24 @@ pub(super) fn prepare(
     );
     frame = start;
     last_update = Instant::now();
+    let mut windows = WindowBuffers::new();
     while frame < end {
         if cancel.load(Ordering::Acquire) {
             return Err("Export cancelled".into());
         }
         let next = frame.saturating_add(chunk_frames).min(end);
-        let mut windows = WindowBuffers::new();
-        for (id, block) in required_audio_windows(project, frame, next - frame) {
+        let needed = required_audio_windows(project, frame, next - frame);
+        retain_windows(&mut windows, &needed);
+        for (id, block) in needed {
             if cancel.load(Ordering::Acquire) {
                 return Err("Export cancelled".into());
+            }
+            if windows.get(&id).is_some_and(|buffers| {
+                buffers.iter().any(|window| {
+                    window.start_sample == block * PREVIEW_WINDOW_SAMPLES
+                })
+            }) {
+                continue;
             }
             let spool = spools.get_mut(&id).ok_or("Audio source was not prepared")?;
             windows.entry(id).or_default().push(spool.window(block)?);

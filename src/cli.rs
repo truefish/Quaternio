@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::export::{
-    export_mp4, export_range, EncoderPreference, ExportProgress, ExportSettings, RenderSpeed };
+    export_mp4_with_diagnostics, export_range, EncoderPreference, ExportProgress, ExportSettings, RenderSpeed };
 use crate::project::{FrameRate, Project};
+use crate::export::diagnostics::ExportDiagnostics;
 
 const HELP: &str = "Quaternio headless render\n\
 Usage: quaternio --render PROJECT --output OUTPUT.mp4 [options]\n\
@@ -42,8 +43,6 @@ struct Request {
 
 #[derive(Default)]
 struct ProgressSummary {
-    encoder: Option<String>,
-    route: Option<String>,
     messages: Vec<String> }
 
 #[derive(Serialize)]
@@ -66,7 +65,8 @@ struct RenderReport {
     realtime_multiplier: Option<f64>,
     status: &'static str,
     error: Option<String>,
-    progress_messages: Vec<String> }
+    progress_messages: Vec<String>,
+    diagnostics: ExportDiagnostics }
 
 /// Return false for a normal editor launch; a requested render finishes without UI setup.
 pub fn run_if_requested() -> Result<bool, String> {
@@ -94,7 +94,7 @@ pub fn run_if_requested() -> Result<bool, String> {
         EncoderPreference::Hardware => "hardware",
         EncoderPreference::Auto => "auto" };
     let mut report = RenderReport {
-        schema_version: 1,
+        schema_version: 2,
         project: request.project.clone(),
         output: request.output.clone(),
         requested_encoder,
@@ -119,7 +119,8 @@ pub fn run_if_requested() -> Result<bool, String> {
         realtime_multiplier: None,
         status: "error",
         error: None,
-        progress_messages: Vec::new() };
+        progress_messages: Vec::new(),
+        diagnostics: ExportDiagnostics::default() };
     let result = match project {
         Ok(project) => render(&request, &project, &mut report),
         Err(error) => Err(error) };
@@ -177,19 +178,6 @@ fn render(request: &Request, project: &Project, report: &mut RenderReport) -> Re
     let progress_worker = std::thread::spawn(move || {
         let mut summary = ProgressSummary::default();
         for progress in receiver {
-            let lower = progress.message.to_lowercase();
-            if lower.contains("direct ffmpeg") {
-                summary.route = Some("direct".into());
-            } else if lower.contains("compositor") {
-                summary.route = Some("composite".into());
-            }
-            if !lower.starts_with("checking ") {
-                for label in ["NVIDIA H.264", "Intel H.264", "AMD H.264", "Apple VideoToolbox H.264", "VAAPI H.264", "CPU H.264"] {
-                    if progress.message.contains(label) {
-                        summary.encoder = Some(label.into());
-                    }
-                }
-            }
             if (progress.fraction == 0.0 || progress.done || progress.error.is_some())
                 && !summary.messages.contains(&progress.message)
             {
@@ -209,13 +197,15 @@ fn render(request: &Request, project: &Project, report: &mut RenderReport) -> Re
             timeout_cancel.store(true, Ordering::Relaxed);
         });
     }
-    let result = export_mp4(project, &settings, &cancel, sender);
+    let result = export_mp4_with_diagnostics(
+        project, &settings, &cancel, sender, &mut report.diagnostics,
+    );
+    report.encoder = report.diagnostics.backend.clone();
+    report.route = report.diagnostics.route.map(|route| route.as_str().to_owned());
     report.wall_seconds = started.elapsed().as_secs_f64();
     let summary = progress_worker
         .join()
         .map_err(|_| "Render progress worker stopped unexpectedly")?;
-    report.encoder = summary.encoder;
-    report.route = summary.route;
     report.progress_messages = summary.messages;
     if result.is_ok() {
         report.status = "complete";

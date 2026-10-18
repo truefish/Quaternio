@@ -2,6 +2,11 @@ fn main() {
     // The generated desktop UI can exceed the Windows main-thread stack in
     // debug builds. RUST_MIN_STACK only affects newly spawned Rust threads.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=brand/quaternio.rc");
+        println!("cargo:rerun-if-changed=brand/quaternio.ico");
+        embed_resource::compile_for("brand/quaternio.rc", ["quaternio"], embed_resource::NONE)
+            .manifest_required()
+            .expect("embed Quaternio executable icon");
         let stack = if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
             "/STACK:16777216"
         } else {

@@ -357,6 +357,7 @@ pub(super) fn restore_ui_after_sync(ui: &AppWindow, state: &Rc<std::cell::RefCel
         .and_then(|live| live.restored_view.take());
     if let Some(view) = view {
         view.restore(ui);
+        export_form::restore(ui, state);
         state
             .borrow_mut()
             .live

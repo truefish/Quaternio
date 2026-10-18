@@ -1,3 +1,4 @@
+use crate::commands;
 use crate::project::ShortcutProfile;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,110 +66,72 @@ impl Mods {
 }
 
 pub fn lookup(profile: ShortcutProfile, key: &str, mods: Mods) -> Option<Command> {
-    let key = key.to_ascii_lowercase();
-    if mods.ctrl && mods.shift && key == "z" {
-        return Some(Command::Redo);
-    }
-    if mods.ctrl && mods.shift && key == "s" {
-        return Some(Command::SaveAs);
-    }
-    if mods.ctrl && mods.shift && key == "i" {
-        return Some(Command::ImportTimeline);
-    }
-    if mods.ctrl && !mods.shift {
-        return match key.as_str() {
-            "z" => Some(Command::Undo),
-            "y" => Some(Command::Redo),
-            "c" => Some(Command::Copy),
-            "v" => Some(Command::Paste),
-            "s" => Some(Command::Save),
-            "o" => Some(Command::Open),
-            "n" => Some(Command::New),
-            "i" => Some(Command::Import),
-            "q" => Some(Command::Quit),
-            "a" => Some(Command::SelectAll),
-            "k" => match profile {
-                ShortcutProfile::Premiere => Some(Command::Split),
-                ShortcutProfile::Resolve => None },
-            "b" => match profile {
-                ShortcutProfile::Premiere => None,
-                ShortcutProfile::Resolve => Some(Command::Split) },
-            "e" => Some(Command::ExportView),
-            "=" | "+" => Some(Command::ZoomIn),
-            "-" | "_" => Some(Command::ZoomOut),
-            "0" => Some(Command::ZoomFit),
-            _ => None };
-    }
-    if mods.ctrl {
-        return None;
-    }
+    // The catalog is the source of truth for defaults, including exact
+    // modifiers. Alt+Left must not fall through to plain Left, for example.
+    // The app resolves user overrides before dispatching by action id.
+    let chord = commands::chord(key, mods);
+    let action = commands::ACTIONS
+        .iter()
+        .find(|action| {
+            let binding = action.default_binding(profile);
+            !binding.is_empty() && binding == chord
+        })
+        .map(|action| action.id)
+        // Match the app's convenience aliases only when no default owns the key.
+        .or_else(|| match chord.as_str() {
+            "ctrl+y" => Some("redo"),
+            "ctrl+=" | "ctrl++" | "+" => Some("zoom-in"),
+            "ctrl+-" => Some("zoom-out"),
+            "backspace" if profile == ShortcutProfile::Premiere => Some("lift"),
+            _ => None })?;
 
-    if mods.shift && key == "delete" {
-        return Some(match profile {
-            ShortcutProfile::Premiere => Command::RippleDelete,
-            ShortcutProfile::Resolve => Command::RippleDelete });
-    }
-    if mods.shift && key == "i" {
-        return Some(Command::GotoIn);
-    }
-    if mods.shift && key == "o" {
-        return Some(Command::GotoOut);
-    }
-    if mods.shift && key == "left" {
-        return Some(Command::StepBackSecond);
-    }
-    if mods.shift && key == "right" {
-        return Some(Command::StepForwardSecond);
-    }
-    if mods.alt && key == "x" {
-        return Some(Command::ClearInOut);
-    }
-
-    let plain = match key.as_str() {
-        " " | "space" => Some(Command::PlayPause),
-        "j" => Some(Command::ShuttleReverse),
-        "k" => Some(Command::ShuttleStop),
-        "l" => Some(Command::ShuttleForward),
-        "i" => Some(Command::MarkIn),
-        "o" => Some(Command::MarkOut),
-        "q" => Some(Command::RipplePrev),
-        "w" => Some(Command::RippleNext),
-        "left" => Some(Command::StepBack),
-        "right" => Some(Command::StepForward),
-        "up" => Some(Command::PrevEdit),
-        "down" => Some(Command::NextEdit),
-        "home" => Some(Command::Home),
-        "end" => Some(Command::End),
-        "=" | "+" => Some(Command::ZoomIn),
-        "-" | "_" => Some(Command::ZoomOut),
-        "m" => Some(Command::MuteTrack),
-        "escape" => Some(Command::Escape),
-        "delete" => Some(match profile {
-            ShortcutProfile::Premiere => Command::LiftDelete,
-            ShortcutProfile::Resolve => Command::RippleDelete }),
-        "backspace" => Some(match profile {
-            ShortcutProfile::Premiere => Command::LiftDelete,
-            ShortcutProfile::Resolve => Command::LiftDelete }),
-        _ => None };
-    if plain.is_some() {
-        return plain;
-    }
-
-    match profile {
-        ShortcutProfile::Premiere => match key.as_str() {
-            "v" => Some(Command::SelectTool),
-            "," => Some(Command::Insert),
-            "." => Some(Command::Overwrite),
-            "c" => Some(Command::RazorTool),
-            "s" => Some(Command::Snap),
-            _ => None },
-        ShortcutProfile::Resolve => match key.as_str() {
-            "f9" => Some(Command::Insert),
-            "f10" => Some(Command::Overwrite),
-            "b" => Some(Command::RazorTool),
-            "a" => Some(Command::SelectTool),
-            "n" => Some(Command::Snap),
-            _ => None } }
+    Some(match action {
+        "new" => Command::New,
+        "open" => Command::Open,
+        "save" => Command::Save,
+        "save-as" => Command::SaveAs,
+        "import" => Command::Import,
+        "import-timeline" => Command::ImportTimeline,
+        "quit" => Command::Quit,
+        "undo" => Command::Undo,
+        "redo" => Command::Redo,
+        "copy" => Command::Copy,
+        "paste" => Command::Paste,
+        "select-all" => Command::SelectAll,
+        "split" => Command::Split,
+        "tool-razor" => Command::RazorTool,
+        "tool-select" => Command::SelectTool,
+        "insert" => Command::Insert,
+        "overwrite" => Command::Overwrite,
+        "ripple-delete" => Command::RippleDelete,
+        "lift" => Command::LiftDelete,
+        "ripple-prev" => Command::RipplePrev,
+        "ripple-next" => Command::RippleNext,
+        "play-toggle" => Command::PlayPause,
+        "shuttle-j" => Command::ShuttleReverse,
+        "shuttle-k" => Command::ShuttleStop,
+        "shuttle-l" => Command::ShuttleForward,
+        "mark-in" => Command::MarkIn,
+        "mark-out" => Command::MarkOut,
+        "goto-in" => Command::GotoIn,
+        "goto-out" => Command::GotoOut,
+        "clear-io" => Command::ClearInOut,
+        "step-back" => Command::StepBack,
+        "step-fwd" => Command::StepForward,
+        "step-back-second" => Command::StepBackSecond,
+        "step-fwd-second" => Command::StepForwardSecond,
+        "prev-edit" => Command::PrevEdit,
+        "next-edit" => Command::NextEdit,
+        "home" => Command::Home,
+        "end" => Command::End,
+        "zoom-in" => Command::ZoomIn,
+        "zoom-out" => Command::ZoomOut,
+        "zoom-fit" => Command::ZoomFit,
+        "snap" => Command::Snap,
+        "mute-track" => Command::MuteTrack,
+        "deselect" => Command::Escape,
+        "export-view" => Command::ExportView,
+        _ => return None })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -185,7 +148,8 @@ pub fn cheat_sheet(profile: ShortcutProfile) -> &'static [(&'static str, &'stati
     match profile {
         ShortcutProfile::Premiere => &[
             ("I / O", "Mark in / out"),
-            ("Shift+I / O", "Go to in / out"),
+            ("Shift+I / Shift+O", "Go to in / out"),
+            ("Ctrl+Shift+X", "Clear in / out"),
             ("Q / W", "Ripple trim previous / next"),
             ("V", "Selection"),
             (",", "Insert"),
@@ -199,10 +163,15 @@ pub fn cheat_sheet(profile: ShortcutProfile) -> &'static [(&'static str, &'stati
             ("S", "Snap"),
             ("← →", "Step frame"),
             ("Ctrl+Z", "Undo"),
+            ("Backslash", "Fit sequence"),
+            ("Backtick", "Expand Program / Timeline"),
+            ("Shift+1 / Shift+2", "Project / Source panel"),
+            ("Shift+3 / Shift+4", "Timeline / Program panel"),
+            ("Ctrl+M", "Export sequence"),
         ],
         ShortcutProfile::Resolve => &[
             ("I / O", "Mark in / out"),
-            ("Shift+I / O", "Go to in / out"),
+            ("Shift+I / Shift+O", "Go to in / out"),
             ("Q / W", "Ripple trim previous / next"),
             ("F9", "Insert"),
             ("F10", "Overwrite"),

@@ -6,13 +6,13 @@ import "fonts/Inter-SemiBold.ttf";
 import "fonts/Inter-Italic.ttf";
 
 global Palette {
-    out property <color> bg0: #171719;
-    out property <color> bg1: #222224;
-    out property <color> bg2: #29292C;
-    out property <color> bg3: #3B3B40;
-    out property <color> accent: #64B5F6;
-    out property <color> text-primary: #E8E8EB;
-    out property <color> text-secondary: #B3B3BC;
+    out property <color> bg0: #141414;
+    out property <color> bg1: #202020;
+    out property <color> bg2: #262626;
+    out property <color> bg3: #393939;
+    out property <color> accent: #579CF3;
+    out property <color> text-primary: #E0E0E0;
+    out property <color> text-secondary: #ABABAB;
     out property <color> text-disabled: #747474;
     out property <color> text-on-action: #FFFFFF;
     out property <color> accent-muted: #293B4D;
@@ -27,10 +27,10 @@ global Palette {
     out property <color> danger: #9C4A4A;
     out property <color> danger-hover: #8E3E3E;
     out property <color> danger-pressed: #7A3434;
-    out property <color> clip-video: #575078;
-    out property <color> clip-video-on: #756896;
-    out property <color> clip-audio: #355B4D;
-    out property <color> clip-audio-on: #4C7766;
+    out property <color> clip-video: #3B607A;
+    out property <color> clip-video-on: #527F9F;
+    out property <color> clip-audio: #405E39;
+    out property <color> clip-audio-on: #5B8050;
     out property <color> clip-still: #665039;
     out property <color> clip-still-on: #826649;
     out property <color> trans-video: #496B83;
@@ -48,7 +48,7 @@ export struct ClipView { waveform: image, waveform-x: float, waveform-width: flo
 export struct DropGhost { x: float, y: float, w: float, h: float, video: bool, }
 export struct TransView { id: int, x: float, y: float, w: float, h: float, selected: bool, audio: bool, label: string, }
 export struct Tick { x: float, label: string, major: bool, }
-export struct QueueItem { id: int, name: string, output: string, status: string, removable: bool, retryable: bool, complete: bool, }
+export struct QueueItem { id: int, name: string, output: string, status: string, state-label: string, removable: bool, retryable: bool, complete: bool, }
 export struct MenuOption { label: string, hint: string, enabled: bool, divider: bool, }
 export struct LabelItem { text: string, }
 export struct ShortcutRow { keys: string, action: string, }
@@ -253,10 +253,14 @@ component ChoiceButton inherits Rectangle {
                     viewport-width: self.width; viewport-height: root.choices.length * 28px;
                     viewport-y: 0px;
                     VerticalLayout { width: parent.width; spacing: 0px;
-                        for item[index] in root.choices: Rectangle { height: 28px; background: root.highlighted == index || row-touch.has-hover ? Palette.accent-muted : transparent;
+                        for item[index] in root.choices: Rectangle { height: 28px; background: root.highlighted == index ? Palette.accent-muted : transparent;
                             Rectangle { x: 0px; y: 5px; width: 2px; height: 18px; background: root.selected == index ? Palette.accent : transparent; }
                             Text { x: 9px; width: parent.width - 18px; height: 100%; text: item.text + root.suffix; color: root.selected == index ? Palette.accent : Palette.text-primary; font-size: 12px; font-weight: root.selected == index ? 600 : 400; vertical-alignment: center; overflow: elide; }
-                            row-touch := LiveTouchArea { mouse-cursor: pointer; clicked => { root.choose(index); } }
+                            row-touch := LiveTouchArea { mouse-cursor: pointer;
+                                changed has-hover => { if (self.has-hover) { root.highlighted = index; } }
+                                pointer-event(event) => { if (event.kind == PointerEventKind.move) { root.highlighted = index; } }
+                                clicked => { root.choose(index); }
+                            }
                         }
                     }
                 }
@@ -357,15 +361,54 @@ component AudioMeterBar inherits Rectangle {
     Rectangle { x: parent.width - 3px; width: 3px; height: 100%; background: root.clipped ? #FF5F57 : transparent; }
 }
 
+// Same normalized live meter values as AudioMeterBar, oriented for the timeline.
+component VerticalMeter inherits Rectangle {
+    in property <float> level: 0;
+    in property <float> held: 0;
+    in property <bool> clipped: false;
+    horizontal-stretch: 1; min-width: 8px; background: #101010; clip: true;
+    Rectangle { x: 0px; y: parent.height * 0.3; width: 100%; height: parent.height * 0.7; background: #55AD77; }
+    Rectangle { x: 0px; y: parent.height * 0.1; width: 100%; height: parent.height * 0.2; background: #D4B05C; }
+    Rectangle { x: 0px; y: 0px; width: 100%; height: parent.height * 0.1; background: #D46B61; }
+    Rectangle { x: 0px; y: 0px; width: 100%; height: parent.height * (1 - max(0, min(1, root.level))); background: #101010; }
+    Rectangle { x: 0px; y: max(0px, min(parent.height - 2px, parent.height * (1 - root.held))); width: 100%; height: 2px; visible: root.held > 0; background: Palette.text-primary; }
+    Rectangle { x: 0px; y: 0px; width: 100%; height: 3px; visible: root.clipped; background: #FF5F57; }
+}
+
 component Field inherits Rectangle {
     in-out property <string> value;
     in property <string> placeholder: "";
+    in property <bool> enabled: true;
     callback focused();
-    height: 28px; border-radius: 3px; background: Palette.bg0; border-width: 1px; border-color: input.has-focus ? Palette.accent : Palette.bg3;
+    callback edited();
+    height: 28px; border-radius: 3px; background: root.enabled ? Palette.bg0 : Palette.bg2; border-width: 1px; border-color: input.has-focus ? Palette.accent : Palette.bg3;
     Text { text: root.value == "" ? root.placeholder : ""; x: 7px; width: parent.width - 14px; height: 100%; color: Palette.text-secondary; font-size: 12px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; }
     input := TextInput {
+                enabled: root.enabled; edited => { root.edited(); }
                 Timer { interval: 150ms; running: input.has-focus; triggered => { LiveFocus.heartbeat(); } }
-                property <bool> live-focus-counted: false; x: 7px; width: parent.width - 14px; height: 100%; text <=> root.value; color: Palette.text-primary; font-size: 12px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; single-line: true; changed has-focus => { if (self.has-focus != self.live-focus-counted) { self.live-focus-counted = self.has-focus; if (self.has-focus) { LiveFocus.input-gained(); } else { LiveFocus.input-lost(); } }  if (self.has-focus) { root.focused(); } } }
+                property <bool> live-focus-counted: false; x: 7px; width: parent.width - 14px; height: 100%; text <=> root.value; color: root.enabled ? Palette.text-primary : Palette.text-disabled; font-size: 12px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; single-line: true; changed has-focus => { if (self.has-focus != self.live-focus-counted) { self.live-focus-counted = self.has-focus; if (self.has-focus) { LiveFocus.input-gained(); } else { LiveFocus.input-lost(); } }  if (self.has-focus) { root.focused(); } } }
+}
+
+component ExportLabel inherits Text {
+    height: 18px; color: Palette.text-secondary; font-size: 12px;
+    vertical-alignment: center;
+}
+
+component ExportHeading inherits Text {
+    height: 26px; color: Palette.text-primary; font-size: 13px; font-weight: 600;
+    vertical-alignment: center;
+}
+
+component ExportPath inherits Rectangle {
+    in property <string> value;
+    height: 34px;
+    TextInput {
+        width: 100%; height: 100%; text: root.value; read-only: true;
+        single-line: false; wrap: char-wrap; color: Palette.text-secondary; font-size: 11px;
+        property <bool> counted: false;
+        changed has-focus => { if (self.has-focus != self.counted) { self.counted = self.has-focus; if (self.has-focus) { LiveFocus.input-gained(); } else { LiveFocus.input-lost(); } } }
+        Timer { interval: 150ms; running: parent.has-focus; triggered => { LiveFocus.heartbeat(); } }
+    }
 }
 
 component MenuEntry inherits Rectangle {
@@ -389,6 +432,7 @@ component KeyboardMenu inherits Rectangle {
     callback dismissed();
     callback adjacent(int);
     property <int> highlighted: -1;
+    property <bool> pointer-active: false;
     property <bool> opening: true;
     changed menu-id => { root.opening = true; }
     background: Palette.bg2; border-width: 1px; border-color: Palette.bg3; border-radius: 3px;
@@ -433,7 +477,7 @@ component KeyboardMenu inherits Rectangle {
         return -1;
     }
 
-    Timer { interval: 1ms; running: root.opening; triggered => { root.opening = false; root.highlighted = root.next-enabled(0, 1); menu-focus.focus(); menu-focus.reveal(); } }
+    Timer { interval: 1ms; running: root.opening; triggered => { root.opening = false; if (!root.pointer-active) { root.highlighted = root.next-enabled(0, 1); } menu-focus.focus(); menu-focus.reveal(); } }
     menu-focus := FocusScope {
         property <bool> counted: false;
         changed has-focus => {
@@ -457,10 +501,11 @@ component KeyboardMenu inherits Rectangle {
             for item[index] in root.items: Rectangle { y: index * 28px; height: 28px; width: menu-scroll.width;
                 background: item.enabled && root.highlighted == index ? Palette.accent-muted : Palette.bg2;
                 if item.divider: Rectangle { x: 4px; width: parent.width - 8px; height: 1px; background: Palette.bg3; }
-                Text { x: 8px; width: max(0px, parent.width - 100px); height: 100%; text: item.label; color: item.enabled ? Palette.text-primary : Palette.text-disabled; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                Text { x: 8px; width: max(0px, parent.width - (item.hint == "" ? 16px : 100px)); height: 100%; text: item.label; color: item.enabled ? Palette.text-primary : Palette.text-disabled; font-size: 12px; vertical-alignment: center; overflow: elide; }
                 Text { x: max(0px, parent.width - 92px); width: 84px; height: 100%; text: item.hint; color: item.enabled ? Palette.text-secondary : Palette.text-disabled; font-size: 10px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
                 LiveTouchArea { mouse-cursor: item.enabled ? pointer : default;
-                    moved => { if (item.enabled) { root.highlighted = index; } }
+                    changed has-hover => { if (self.has-hover) { root.pointer-active = true; root.highlighted = item.enabled ? index : -1; } }
+                    pointer-event(event) => { if (event.kind == PointerEventKind.move) { root.pointer-active = true; root.highlighted = item.enabled ? index : -1; } }
                     clicked => { if (item.enabled) { root.activated(index); } }
                 }
             }
@@ -473,9 +518,14 @@ component BarItem inherits Rectangle {
     in property <bool> on: false;
     in property <length> w: 48px;
     callback clicked();
+    callback hovered();
     width: root.w; height: 28px; border-radius: 3px;
     background: root.on || touch.has-hover ? Palette.bg3 : Palette.bg2;
-    touch := LiveTouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+    touch := LiveTouchArea { mouse-cursor: pointer;
+        changed has-hover => { if (self.has-hover) { root.hovered(); } }
+        pointer-event(event) => { if (event.kind == PointerEventKind.move) { root.hovered(); } }
+        clicked => { root.clicked(); }
+    }
     HorizontalLayout { padding-left: 8px; padding-right: 8px; alignment: start;
         Text { text: root.label; color: Palette.text-primary; font-size: 11px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; }
     }
@@ -579,24 +629,39 @@ component FoldHead inherits Rectangle {
     in property <bool> open: false;
     in property <bool> enabled: true;
     callback toggled();
-    height: 22px; border-radius: 0px; background: Palette.bg1; border-width: 0px;
-    Rectangle { height: 1px; background: Palette.bg3; }
-    touch := LiveTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if (root.enabled) { root.toggled(); } } }
+    callback focused();
+    forward-focus: header-focus;
+    property <bool> keyboard-held: false;
+    function release-key() { if (root.keyboard-held) { root.keyboard-held = false; LiveFocus.input-lost(); } }
+    height: 22px; border-radius: 0px; background: header-focus.has-focus ? Palette.accent-muted : touch.has-hover ? Palette.bg2 : Palette.bg1;
+    header-focus := FocusScope {
+        enabled: root.enabled && !KeyboardControls.blocked;
+        changed has-focus => { if (self.has-focus) { KeyboardControls.navigating = true; root.focused(); } else { root.release-key(); } }
+        key-pressed(event) => {
+            if (event.text == Key.Return || event.text == " " || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                if (!root.keyboard-held) { root.keyboard-held = true; LiveFocus.input-gained(); }
+                return accept;
+            }
+            return reject;
+        }
+        key-released(event) => {
+            if (event.text == Key.Return || event.text == " " || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                if (root.keyboard-held) {
+                    root.release-key();
+                    if (event.text == Key.Return || event.text == " " || (event.text == Key.LeftArrow && root.open) || (event.text == Key.RightArrow && !root.open)) { root.toggled(); }
+                }
+                return accept;
+            }
+            return reject;
+        }
+        Timer { interval: 150ms; running: root.keyboard-held; triggered => { LiveFocus.heartbeat(); } }
+    }
+    touch := LiveTouchArea { enabled: root.enabled && !KeyboardControls.blocked; mouse-cursor: pointer; clicked => { header-focus.focus(); root.toggled(); } }
     HorizontalLayout { padding-left: 8px; spacing: 4px; alignment: start; y: 1px; height: 21px;
         Rectangle { width: 12px;
             Image { x: 0px; y: (parent.height - 12px) / 2; width: 12px; height: 12px; source: root.open ? @image-url("icons/chevron-down.svg") : @image-url("icons/chevron-right.svg"); colorize: root.enabled ? Palette.text-secondary : Palette.text-disabled; }
         }
         Text { text: root.label; color: root.enabled ? Palette.text-primary : Palette.text-disabled; font-size: 11px; font-weight: 600; horizontal-alignment: left; vertical-alignment: center; }
-    }
-}
-
-component SetRow inherits Rectangle {
-    in property <string> label;
-    in property <string> value;
-    height: 28px;
-    Text { text: root.label; x: 0px; y: 0px; width: 108px; height: 100%; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: left; vertical-alignment: center; }
-    Rectangle { x: 116px; y: 0px; width: parent.width - 116px; height: 28px; background: Palette.bg0; border-width: 1px; border-color: Palette.bg3; border-radius: 3px;
-        Text { text: root.value; x: 8px; width: parent.width - 16px; height: 100%; color: Palette.text-primary; font-size: 12px; font-weight: 500; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
     }
 }
 
@@ -614,7 +679,6 @@ component SectionHead inherits Rectangle {
     in property <string> label;
     height: 28px;
     background: Palette.bg2;
-    Rectangle { y: 27px; height: 1px; width: 100%; background: Palette.bg3; }
     Text { text: root.label; x: 8px; width: parent.width - 16px; height: 28px; color: Palette.text-primary; font-size: 12px; font-weight: 600; horizontal-alignment: left; vertical-alignment: center; }
 }
 
@@ -987,7 +1051,7 @@ component MediaBin inherits Rectangle {
             PaneDragHeader { draggable: root.dockable; pane: 2; activated => { root.activated(); root.bin-tab = 0; root.focus-editor(); } dock-panel(x, y) => { root.dock-panel(x, y); } }
             Rectangle { x: 0px; y: 30px; width: 100%; height: 2px; background: root.active ? Palette.accent : transparent; }
             HorizontalLayout { padding-left: 8px; padding-right: 4px; spacing: 2px;
-                TextBtn { label: "Media" + (root.selected-count > 1 ? " · " + root.selected-count : ""); tooltip: "Project media"; background: root.bin-tab == 0 ? Palette.accent-muted : transparent; clicked => { root.activated(); root.bin-tab = 0; } }
+                TextBtn { label: "Project" + (root.selected-count > 1 ? " · " + root.selected-count : ""); tooltip: "Project media"; background: root.bin-tab == 0 ? Palette.accent-muted : transparent; clicked => { root.activated(); root.bin-tab = 0; } }
                 Rectangle { width: 4px; }
                 WsTab { label: "Transitions"; on: root.bin-tab == 1; clicked => { root.activated(); root.bin-tab = 1; root.icon-view = false; } }
                 Rectangle { horizontal-stretch: 1; }
@@ -1013,7 +1077,6 @@ component MediaBin inherits Rectangle {
             }
         }
         if root.bin-tab == 0 && root.has-media && !root.icon-view: Rectangle { height: 26px; background: Palette.bg2; border-radius: 0px;
-            Rectangle { y: 25px; height: 1px; width: 100%; background: Palette.bg3; }
             HorizontalLayout { width: parent.width; padding-left: 8px; padding-right: 8px; spacing: 8px;
                 Rectangle { width: 8px; }
                 TextBtn { label: "Name" + (root.sort-column == 0 ? (root.sort-descending ? " ↓" : " ↑") : ""); tooltip: "Sort by name · click again to reverse"; horizontal-stretch: 1; min-width: 0px; clicked => { root.activated(); root.sort-media(0); root.focus-editor(); } }
@@ -1025,7 +1088,7 @@ component MediaBin inherits Rectangle {
         }
         Rectangle { vertical-stretch: 1; min-height: 110px; clip: true;
             if root.bin-tab == 0 && !root.has-media: VerticalLayout { padding: 16px; spacing: 8px; alignment: center;
-                Text { text: root.query == "" && root.bin-filter == 0 ? "Your media starts here" : "No matching media"; color: Palette.text-primary; font-size: 13px; font-weight: 600; horizontal-alignment: center; wrap: word-wrap; }
+                Text { text: root.query == "" && root.bin-filter == 0 ? "No media imported" : "No matching media"; color: Palette.text-primary; font-size: 13px; font-weight: 600; horizontal-alignment: center; wrap: word-wrap; }
                 Text { text: root.query == "" && root.bin-filter == 0 ? "Drop files here or choose Import media." : "Try another search or media filter."; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
                 HorizontalLayout { alignment: center;
                     SecBtn { label: root.query == "" && root.bin-filter == 0 ? "Import media" : "Show all media"; clicked => { root.activated(); if (root.query == "" && root.bin-filter == 0) { root.command("import"); } else { root.query = ""; root.bin-filter = 0; root.command("filter"); } } }
@@ -1173,7 +1236,7 @@ component SourcePane inherits Rectangle {
             }
         }
         Rectangle { height: 16px; background: Palette.bg2;
-            Rectangle { x: 8px; y: 7px; width: parent.width - 16px; height: 4px; background: Palette.bg3;
+            Rectangle { visible: root.usable; x: 8px; y: 7px; width: parent.width - 16px; height: 4px; background: Palette.bg3;
                 Rectangle { x: max(0, min(1, root.in-position)) * parent.width; width: max(0, root.out-position - root.in-position) * parent.width; height: 4px; background: root.range-on ? Palette.accent-muted : transparent; }
                 Rectangle { x: max(0, min(1, root.in-position)) * (parent.width - 2px); y: -3px; width: 2px; height: 10px; background: root.range-on ? Palette.text-primary : transparent; }
                 Rectangle { x: max(0, min(1, root.out-position)) * (parent.width - 2px); y: -3px; width: 2px; height: 10px; background: root.range-on ? Palette.text-primary : transparent; }
@@ -1235,7 +1298,7 @@ component ToolBtn inherits Rectangle {
 
 export component AppWindow inherits Window {
     title: root.window-title + (root.live-preview ? " · Live" : "");
-    icon: @image-url("icons/quaternio.svg");
+    icon: @image-url("icons/quaternio.png");
     in-out property <string> window-title: "Quaternio";
     preferred-width: 1440px;
     preferred-height: 900px;
@@ -1249,6 +1312,7 @@ export component AppWindow inherits Window {
 
     in-out property <int> page: 0;
     in-out property <int> active-panel: 1;
+    in-out property <int> expanded-panel: -1;
     in-out property <bool> show-command-palette: false;
     in-out property <string> command-query: "";
     in-out property <int> command-selection: 0;
@@ -1444,6 +1508,16 @@ export component AppWindow inherits Window {
     in-out property <float> trans-dur: 12;
     in property <string> read-trans: "12";
     in-out property <string> export-path: "";
+    in-out property <string> export-filename: "";
+    in-out property <string> export-folder: "";
+    in property <string> export-form-error: "";
+    in property <string> export-range-label: "";
+    in property <bool> export-range-available: false;
+    in property <bool> export-ready: false;
+    in property <string> export-result-path: "";
+    in property <int> export-result-state: 0;
+    in property <string> export-active-path: "";
+    in property <bool> export-checking: false;
     in-out property <string> export-width: "1920";
     in-out property <string> export-height: "1080";
     in-out property <int> export-fps: 1;
@@ -1453,9 +1527,7 @@ export component AppWindow inherits Window {
     in-out property <bool> export-inout: false;
     in-out property <float> export-crf: 21;
     in-out property <int> export-speed: 0;
-    property <bool> export-speed-open: false;
     in-out property <int> export-encoder: 0;
-    property <bool> export-encoder-open: false;
     in property <string> read-crf: "21";
     in property <float> export-progress: 0;
     in property <bool> export-preparing: false;
@@ -1470,7 +1542,6 @@ export component AppWindow inherits Window {
     in property <[QueueItem]> queue-items;
     in property <bool> queue-pending: false;
     in property <bool> queue-has-finished: false;
-    in-out property <bool> export-rate-open: false;
     in property <[LabelItem]> rates;
     in property <[LabelItem]> presets;
     in property <[ShortcutRow]> shortcuts;
@@ -1481,7 +1552,6 @@ export component AppWindow inherits Window {
     callback sequence-match-choice(int);
     in property <bool> can-edit-selection: false;
     in property <bool> can-split: false;
-    property <bool> export-presets-open: false;
     property <int> preferences-tab: 0;
     in property <string> dialog-title: "New project";
     in property <string> dialog-error: "";
@@ -1552,17 +1622,17 @@ export component AppWindow inherits Window {
     property <length> time-w: 800px;
     property <length> time-body: max(140px, root.time-h - 80px);
     out property <float> body-px: root.time-body / 1px;
-    out property <float> timeline-px: max(1px, root.width - (root.workspace == 0 ? root.bottom-bin-w + 5px : 0px) - 160px - root.track-scrollbar-width) / 1px;
+    out property <float> timeline-px: max(1px, root.width - (root.workspace == 0 && root.expanded-panel < 0 ? root.bottom-bin-w + 5px : 0px) - 160px - root.track-scrollbar-width - 96px) / 1px;
     out property <float> preview-px-width: max(1px, root.workspace == 1 ? root.preview-w : root.view-region) / 1px;
-    out property <float> preview-px-height: max(1px, root.upper-h - 126px) / 1px;
+    out property <float> preview-px-height: max(1px, root.upper-h - 134px) / 1px;
     in-out property <bool> project-top: false;
-    // Zero keeps the two monitors balanced until the divider is dragged.
+    // Default to a compact source panel and a larger program monitor.
     in-out property <float> source-width: 0;
     in-out property <float> properties-width: 300;
     in-out property <float> project-width: 320;
-    in-out property <float> upper-ratio: 0.55;
-    out property <float> timeline-origin-x: ((root.workspace == 0 ? root.bottom-bin-w + 5px : 0px) + 160px) / 1px;
-    out property <float> timeline-origin-y: (root.upper-h + 150px) / 1px;
+    in-out property <float> upper-ratio: 0.57;
+    out property <float> timeline-origin-x: ((root.workspace == 0 && root.expanded-panel < 0 ? root.bottom-bin-w + 5px : 0px) + 196px) / 1px;
+    out property <float> timeline-origin-y: (root.upper-h + root.panel-split-h + 142px) / 1px;
     property <float> track-scroll-position: 0;
     property <float> track-scroll-max: max(0, root.tracks-h - root.body-px);
     property <length> track-scrollbar-width: root.track-scroll-max > 0.5 ? 14px : 0px;
@@ -1592,19 +1662,19 @@ export component AppWindow inherits Window {
     in property <float> media-drop-width: 0;
     in property <float> media-drop-height: 0;
     property <length> mid-h: root.height - 84px;
-    property <length> upper-h: max(280px, min(root.mid-h - 288px, (root.mid-h - 8px) * root.upper-ratio));
-    property <length> time-h: root.mid-h - root.upper-h - 8px;
-    property <length> span: root.width - 10px;
-    property <length> preview-w: 480px;
-    property <length> bin-w: root.workspace == 2 ? 240px : root.workspace == 1 ? root.width - root.preview-w - 5px : max(240px, min(root.project-top ? root.project-width * 1px : root.source-width > 0 ? root.source-width * 1px : (root.width - root.insp-w - 10px) / 2, root.width - root.insp-w - 330px));
+    property <length> panel-split-h: root.expanded-panel < 0 ? 8px : 0px;
+    property <length> upper-h: root.expanded-panel == 3 ? 0px : root.expanded-panel == 1 ? root.mid-h : max(280px, min(root.mid-h - 288px, (root.mid-h - 8px) * root.upper-ratio));
+    property <length> time-h: root.mid-h - root.upper-h - root.panel-split-h;
+    property <length> span: root.expanded-panel == 1 ? root.width : root.width - 10px;
+    property <length> preview-w: max(360px, min(640px, root.width * 0.48));
+    property <length> bin-w: root.expanded-panel == 1 ? 0px : root.workspace == 2 ? 240px : root.workspace == 1 ? root.width - root.preview-w - 5px : max(240px, min(root.project-top ? root.project-width * 1px : root.source-width > 0 ? root.source-width * 1px : (root.width - root.insp-w - 10px) * 0.34, root.width - root.insp-w - 330px));
     property <length> bottom-bin-w: max(240px, min((root.project-top ? (root.source-width > 0 ? root.source-width : 320) : root.project-width) * 1px, root.width - 745px));
-    property <length> insp-w: root.workspace == 1 ? 0px : max(260px, min(root.properties-width * 1px, root.width - 570px));
+    property <length> insp-w: root.workspace == 1 || root.expanded-panel == 1 ? 0px : max(260px, min(root.properties-width * 1px, root.width - 570px));
     property <length> view-region: root.span - root.bin-w - root.insp-w;
     property <bool> pair: false;
     property <bool> wide-bin: root.bin-w >= 520px;
     property <bool> show-status-extra: root.width >= 1440px;
     property <bool> stack-wheels: root.insp-w < 560px;
-    property <string> quality-name: root.quality == 2 ? "Quarter" : root.quality == 1 ? "Half" : "Full";
 
     callback command(string);
     callback palette-run(string);
@@ -1630,8 +1700,9 @@ export component AppWindow inherits Window {
     // interaction state here rather than reaching through that component's ID.
     property <bool> razor-track-hover: false;
     property <bool> razor-track-pressed: false;
-    changed page => { root.razor-track-hover = false; root.razor-track-pressed = false; }
-    changed workspace => { root.razor-track-hover = false; root.razor-track-pressed = false; }
+    changed expanded-panel => { ToolHints.shown = false; }
+    changed page => { root.expanded-panel = -1; ToolHints.shown = false; root.razor-track-hover = false; root.razor-track-pressed = false; }
+    changed workspace => { root.expanded-panel = -1; ToolHints.shown = false; root.razor-track-hover = false; root.razor-track-pressed = false; }
     out property <bool> razor-hover-allowed: root.tool-razor && root.page == 0 && root.razor-track-hover && !root.razor-track-pressed
         && root.open-menu == 0 && !root.filter-open && !root.quality-open && !root.show-dialog && !root.show-prefs
         && !root.show-about && !root.show-command-palette && !root.show-sequence-match && !root.live-reloading && !LiveFocus.active;
@@ -1667,6 +1738,7 @@ export component AppWindow inherits Window {
     public function focus-pane(pane: int) {
         keys.focus();
         root.active-panel = max(0, min(4, pane));
+        if (pane == 2) { root.bin-tab = 0; }
     }
     pure function normalized-key(text: string) -> string {
         if (text == Key.LeftArrow) { return "left"; }
@@ -1719,24 +1791,28 @@ export component AppWindow inherits Window {
             spacing: 0;
             Rectangle {
                 height: 30px; background: Palette.bg2; border-radius: 0px;
-                Rectangle { y: 29px; height: 1px; width: 100%; background: Palette.bg3; }
+                LiveTouchArea { clicked => { root.open-menu = 0; keys.focus(); } }
                 HorizontalLayout { alignment: start; spacing: 0;
-                    BarItem { label: "File"; w: 48px; on: root.open-menu == 1; clicked => { root.open-menu = root.open-menu == 1 ? 0 : 1; } }
-                    BarItem { label: "Edit"; w: 46px; on: root.open-menu == 2; clicked => { root.open-menu = root.open-menu == 2 ? 0 : 2; } }
-                    BarItem { label: "Clip"; w: 46px; on: root.open-menu == 3; clicked => { root.open-menu = root.open-menu == 3 ? 0 : 3; } }
-                    BarItem { label: "Sequence"; w: 78px; on: root.open-menu == 4; clicked => { root.open-menu = root.open-menu == 4 ? 0 : 4; } }
-                    BarItem { label: "Mark"; w: 48px; on: root.open-menu == 5; clicked => { root.open-menu = root.open-menu == 5 ? 0 : 5; } }
-                    BarItem { label: "Color"; w: 52px; on: root.open-menu == 6; clicked => { root.open-menu = root.open-menu == 6 ? 0 : 6; } }
-                    BarItem { label: "View"; w: 48px; on: root.open-menu == 7; clicked => { root.open-menu = root.open-menu == 7 ? 0 : 7; } }
-                    BarItem { label: "Window"; w: 64px; on: root.open-menu == 8; clicked => { root.open-menu = root.open-menu == 8 ? 0 : 8; } }
-                    BarItem { label: "Help"; w: 48px; on: root.open-menu == 9; clicked => { root.open-menu = root.open-menu == 9 ? 0 : 9; } }
+                    BarItem { label: "File"; w: 48px; on: root.open-menu == 1; hovered => { if (root.open-menu != 0) { root.open-menu = 1; } } clicked => { root.open-menu = root.open-menu == 1 ? 0 : 1; } }
+                    BarItem { label: "Edit"; w: 46px; on: root.open-menu == 2; hovered => { if (root.open-menu != 0) { root.open-menu = 2; } } clicked => { root.open-menu = root.open-menu == 2 ? 0 : 2; } }
+                    BarItem { label: "Clip"; w: 46px; on: root.open-menu == 3; hovered => { if (root.open-menu != 0) { root.open-menu = 3; } } clicked => { root.open-menu = root.open-menu == 3 ? 0 : 3; } }
+                    BarItem { label: "Sequence"; w: 78px; on: root.open-menu == 4; hovered => { if (root.open-menu != 0) { root.open-menu = 4; } } clicked => { root.open-menu = root.open-menu == 4 ? 0 : 4; } }
+                    BarItem { label: "Mark"; w: 48px; on: root.open-menu == 5; hovered => { if (root.open-menu != 0) { root.open-menu = 5; } } clicked => { root.open-menu = root.open-menu == 5 ? 0 : 5; } }
+                    BarItem { label: "Color"; w: 52px; on: root.open-menu == 6; hovered => { if (root.open-menu != 0) { root.open-menu = 6; } } clicked => { root.open-menu = root.open-menu == 6 ? 0 : 6; } }
+                    BarItem { label: "View"; w: 48px; on: root.open-menu == 7; hovered => { if (root.open-menu != 0) { root.open-menu = 7; } } clicked => { root.open-menu = root.open-menu == 7 ? 0 : 7; } }
+                    BarItem { label: "Window"; w: 64px; on: root.open-menu == 8; hovered => { if (root.open-menu != 0) { root.open-menu = 8; } } clicked => { root.open-menu = root.open-menu == 8 ? 0 : 8; } }
+                    BarItem { label: "Help"; w: 48px; on: root.open-menu == 9; hovered => { if (root.open-menu != 0) { root.open-menu = 9; } } clicked => { root.open-menu = root.open-menu == 9 ? 0 : 9; } }
                 }
             }
             Rectangle {
                 height: 32px; background: Palette.bg2; border-radius: 0px;
-                Rectangle { y: 31px; height: 1px; width: 100%; background: Palette.bg3; }
                 HorizontalLayout { spacing: 0; padding-right: 4px;
-                    WsTab { label: "Media"; on: root.page == 0 && root.workspace == 1; clicked => { root.command("workspace-media"); } }
+                    Rectangle { width: 34px;
+                        Rectangle { x: 7px; y: 6px; width: 20px; height: 20px; background: #E0E0E0; border-radius: 2px;
+                            Image { x: 2px; y: 2px; width: 16px; height: 16px; source: @image-url("icons/quaternio.svg"); image-fit: contain; }
+                        }
+                    }
+                    WsTab { label: "Import"; on: root.page == 0 && root.workspace == 1; clicked => { root.command("workspace-media"); } }
                     WsTab { label: "Edit"; on: root.page == 0 && root.workspace == 0; clicked => { root.command("workspace-edit"); } }
                     WsTab { label: "Color"; on: root.page == 0 && root.workspace == 2; clicked => { root.command("workspace-color"); } }
                     WsTab { label: "Export"; on: root.page == 1; clicked => { root.command("export-view"); } }
@@ -1776,12 +1852,12 @@ export component AppWindow inherits Window {
                     spacing: 0;
                     width: parent.width;
                     height: parent.height;
-            Rectangle {
+            if root.expanded-panel != 3: Rectangle {
                 height: root.upper-h;
                 vertical-stretch: 0;
                 clip: true;
                 HorizontalLayout { spacing: 0;
-                    if root.workspace == 0 && !root.project-top: SourcePane { width: root.bin-w; active: root.active-panel == 0; activated => { root.active-panel = 0; } dockable: true; dock-panel(x, y) => { root.dock-pane(true, x, y); }
+                    if root.workspace == 0 && !root.project-top && root.expanded-panel != 1: SourcePane { width: root.bin-w; active: root.active-panel == 0; activated => { root.active-panel = 0; } dockable: true; dock-panel(x, y) => { root.dock-pane(true, x, y); }
                         source-image: root.source-image; show-picture: root.show-source-picture; preparing: root.source-preparing; problem: root.source-problem; has-selected-media: root.has-selected-media; source-name: root.source-name; duration-tc: root.source-dur-tc;
                         cursor-tc: root.source-tc; cursor-text: root.source-timecode; usable: root.source-usable; playing: root.source-playing; position: root.source-position;
                         begin-timecode => { root.timecode-begin(true); } seek-timecode(text) => { root.timecode-seek(true, text) }
@@ -1792,7 +1868,7 @@ export component AppWindow inherits Window {
                         source-resized(w, h) => { if (w > 1 && h > 1) { root.source-px-width = w; root.source-px-height = h; } }
                         command(action) => { root.command(action); } focus-editor => { keys.focus(); }
                     }
-                    if root.workspace != 0 || root.project-top: MediaBin { width: root.bin-w; active: root.active-panel == 2; activated => { root.active-panel = 2; } dockable: root.workspace == 0; dock-panel(x, y) => { root.dock-pane(false, x, y); }
+                    if (root.workspace != 0 || root.project-top) && root.expanded-panel != 1: MediaBin { width: root.bin-w; active: root.active-panel == 2; activated => { root.active-panel = 2; } dockable: root.workspace == 0; dock-panel(x, y) => { root.dock-pane(false, x, y); }
                         selected-count: root.project-selected-count; sort-column: root.media-sort-column; sort-descending: root.media-sort-descending;
                         select-media(id, ctrl, shift) => { root.select-media(id, ctrl, shift); } sort-media(column) => { root.sort-media(column); }
                         bin-items: root.bin-items; has-media: root.has-media; armed-kind: root.armed-kind;
@@ -1802,10 +1878,10 @@ export component AppWindow inherits Window {
                         command(action) => { root.command(action); } pick(kind, id) => { root.pick(kind, id); } focus-editor => { keys.focus(); }
                         media-drag(id, phase, x, y) => { root.media-drag(id, phase, x, y); }
                     }
-                    Rectangle { width: 5px; background: source-divider.pressed || source-divider.has-hover ? Palette.bg3 : Palette.bg0;
+                    Rectangle { width: root.expanded-panel == 1 ? 0px : 5px; clip: true; background: source-divider.pressed || source-divider.has-hover ? Palette.bg3 : Palette.bg0;
                         Rectangle { x: 2px; y: 0px; width: 1px; height: 100%; background: source-divider.pressed || source-divider.has-hover ? Palette.accent : Palette.bg3; }
                         source-divider := LiveTouchArea {
-                            enabled: root.workspace == 0; mouse-cursor: ew-resize;
+                            enabled: root.workspace == 0 && root.expanded-panel < 0; mouse-cursor: ew-resize;
                             property <float> start-width;
                             property <length> start-x;
                             pointer-event(event) => { if (event.kind == PointerEventKind.down) { self.start-width = root.bin-w / 1px; self.start-x = self.absolute-position.x + self.mouse-x; } }
@@ -1813,7 +1889,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     view-row := Rectangle {
-                        width: parent.width - root.bin-w - root.insp-w - (root.workspace == 1 ? 5px : 10px);
+                        width: parent.width - root.bin-w - root.insp-w - (root.expanded-panel == 1 ? 0px : root.workspace == 1 ? 5px : 10px);
                         background: Palette.bg0; clip: true;
                         if root.workspace == 1: SourcePane { width: 100%; height: 100%; active: root.active-panel == 0; activated => { root.active-panel = 0; }
                             source-image: root.source-image; show-picture: root.show-source-picture; preparing: root.source-preparing; problem: root.source-problem; has-selected-media: root.has-selected-media; source-name: root.source-name; duration-tc: root.source-dur-tc;
@@ -1833,6 +1909,7 @@ export component AppWindow inherits Window {
                                 HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 8px;
                                     Text { text: "Program"; color: Palette.text-primary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
                                     Text { text: root.seq-name; color: Palette.text-secondary; font-size: 12px; horizontal-stretch: 1; min-width: 0px; overflow: elide; vertical-alignment: center; }
+                                    IconBtn { icon: root.expanded-panel == 1 ? @image-url("icons/restore-panel.svg") : @image-url("icons/expand-panel.svg"); tooltip: (root.expanded-panel == 1 ? "Restore workspace" : "Expand Program monitor") + " · " + root.shortcut-hint("toggle-panel-expand", root.shortcut-revision); retain-keyboard-focus: false; clicked => { root.active-panel = 1; keys.focus(); root.command("toggle-panel-expand"); } }
                                 }
                             }
                             view-frame := Rectangle { vertical-stretch: 1; min-height: 32px; background: Palette.bg0; clip: true;
@@ -1864,7 +1941,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Rectangle { height: 16px; background: Palette.bg2;
-                                Rectangle { x: 8px; y: 7px; width: parent.width - 16px; height: 4px; background: Palette.bg3;
+                                Rectangle { visible: root.has-clips; x: 8px; y: 7px; width: parent.width - 16px; height: 4px; background: Palette.bg3;
                                     Rectangle { x: max(0, min(1, root.in-frame / root.seq-frames)) * parent.width; width: max(0, min(1, (root.out-frame - root.in-frame) / root.seq-frames)) * parent.width; height: 4px; background: root.in-on && root.out-on ? Palette.accent-range : transparent; }
                                     Rectangle { x: max(0, min(1, root.playhead-frame / root.seq-frames)) * (parent.width - 2px); y: -4px; width: 2px; height: 12px; background: root.has-clips ? Palette.accent : Palette.text-disabled; }
                                 }
@@ -1886,23 +1963,23 @@ export component AppWindow inherits Window {
                                     IconBtn { enabled: root.has-clips; icon: @image-url("icons/mark-out.svg"); tooltip: "Mark sequence Out · " + root.shortcut-hint("mark-out", root.shortcut-revision); clicked => { root.active-panel = 1; root.command("mark-out"); keys.focus(); } }
                                 }
                             }
-                            Rectangle { height: 22px; background: Palette.bg2;
-                                Text { x: 8px; width: parent.width - 132px; height: 100%; text: root.seq-fps + " fps · " + (root.in-on || root.out-on ? "Marked sequence" : "Entire sequence"); color: Palette.text-secondary; font-size: 10px; vertical-alignment: center; overflow: elide; }
-                                TextBtn { x: parent.width - 124px; width: 116px; height: 20px; label: "Preview: " + root.quality-name; tooltip: "Cycle preview resolution: Full / Half / Quarter. Export resolution is unchanged."; clicked => { root.quality = mod(root.quality + 1, 3); keys.focus(); } }
+                            Rectangle { height: 30px; background: Palette.bg2;
+                                Text { x: 8px; width: parent.width - 162px; height: 100%; text: root.seq-fps + " fps · " + (root.in-on || root.out-on ? "Marked sequence" : "Entire sequence"); color: Palette.text-secondary; font-size: 10px; vertical-alignment: center; overflow: elide; }
+                                ChoiceButton { x: parent.width - 154px; y: 1px; width: 146px; height: 28px; choices: [{text: "Full"}, {text: "Half"}, {text: "Quarter"}]; selected: root.quality; suffix: " resolution"; tooltip: "Playback resolution · lower it for smoother editing. Export quality is unchanged."; chosen(index) => { root.quality = index; keys.focus(); } }
                             }
                         }
                     }
-                    Rectangle { width: root.workspace == 1 ? 0px : 5px; clip: true; background: properties-divider.pressed || properties-divider.has-hover ? Palette.bg3 : Palette.bg0;
+                    Rectangle { width: root.workspace == 1 || root.expanded-panel == 1 ? 0px : 5px; clip: true; background: properties-divider.pressed || properties-divider.has-hover ? Palette.bg3 : Palette.bg0;
                         Rectangle { x: 2px; y: 0px; width: 1px; height: 100%; background: properties-divider.pressed || properties-divider.has-hover ? Palette.accent : Palette.bg3; }
                         properties-divider := LiveTouchArea {
-                            enabled: root.workspace != 1; mouse-cursor: ew-resize;
+                            enabled: root.workspace != 1 && root.expanded-panel < 0; mouse-cursor: ew-resize;
                             property <float> start-width;
                             property <length> start-x;
                             pointer-event(event) => { if (event.kind == PointerEventKind.down) { self.start-width = root.insp-w / 1px; self.start-x = self.absolute-position.x + self.mouse-x; } }
                             moved => { if (self.pressed) { root.properties-width = max(260, min((root.width - 570px) / 1px, self.start-width - (self.absolute-position.x + self.mouse-x - self.start-x) / 1px)); } }
                         }
                     }
-                    Rectangle {
+                    if root.expanded-panel != 1 && root.workspace != 1: Rectangle {
                         width: root.insp-w;
                         clip: true;
                         background: Palette.bg1;
@@ -1911,7 +1988,7 @@ export component AppWindow inherits Window {
                                 LiveTouchArea { clicked => { root.active-panel = 4; keys.focus(); } }
                                 Rectangle { x: 0px; y: 30px; width: 100%; height: 2px; background: root.active-panel == 4 ? Palette.accent : transparent; }
                                 HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 8px; alignment: start;
-                                    Text { text: "Properties"; color: Palette.text-primary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                                    Text { text: "Effect Controls"; color: Palette.text-primary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
                                     Text { text: root.inspector-mode == 0 ? "Sequence" : root.inspector-title; color: Palette.text-secondary; font-size: 12px; horizontal-stretch: 1; min-width: 0px; overflow: elide; vertical-alignment: center; }
                                 }
                             }
@@ -1943,29 +2020,41 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     if root.inspector-mode == 1 && root.grade-tab == 0: VerticalLayout { alignment: start; spacing: 0; padding-top: 8px;
-                                        SectionHead { label: "Transform"; }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Position X"; read: root.read-pos-x; value <=> root.pos-x; minimum: -4096; maximum: 4096; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("pos-x", v); } }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Position Y"; read: root.read-pos-y; value <=> root.pos-y; minimum: -4096; maximum: 4096; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("pos-y", v); } }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Scale"; read: root.read-scale; value <=> root.scale-v; minimum: 0.01; maximum: 4; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("scale", v); } }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Opacity"; read: root.read-opacity; value <=> root.opacity-v; minimum: 0; maximum: 1; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("opacity", v); } }
-                                        HorizontalLayout { padding: 8px; alignment: start;
-                                            TextBtn { label: "Reset transform"; clicked => { root.active-panel = 4; root.pos-x = 0; root.pos-y = 0; root.scale-v = 1; root.opacity-v = 1; root.adjust("pos-x", 0); root.adjust("pos-y", 0); root.adjust("scale", 1); root.adjust("opacity", 1); } }
+                                        FoldHead { label: "Motion"; open: root.motion-open; focused => { root.active-panel = 4; } toggled => { root.motion-open = !root.motion-open; } }
+                                        if root.motion-open: VerticalLayout { spacing: 0; alignment: start;
+                                            NumRow { focused => { root.active-panel = 4; } label: "Position X"; read: root.read-pos-x; value <=> root.pos-x; minimum: -4096; maximum: 4096; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("pos-x", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Position Y"; read: root.read-pos-y; value <=> root.pos-y; minimum: -4096; maximum: 4096; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("pos-y", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Scale"; read: root.read-scale; value <=> root.scale-v; minimum: 0.01; maximum: 4; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("scale", v); } }
+                                            HorizontalLayout { padding: 8px; alignment: start;
+                                                TextBtn { label: "Reset motion"; tooltip: "Reset position and scale as one undoable edit"; clicked => { root.active-panel = 4; root.command("reset-motion"); } }
+                                            }
                                         }
+                                        FoldHead { label: "Opacity"; open: root.opacity-open; focused => { root.active-panel = 4; } toggled => { root.opacity-open = !root.opacity-open; } }
+                                        if root.opacity-open: VerticalLayout { spacing: 0; alignment: start;
+                                            NumRow { focused => { root.active-panel = 4; } label: "Opacity"; read: root.read-opacity; value <=> root.opacity-v; minimum: 0; maximum: 1; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("opacity", v); } }
+                                            HorizontalLayout { padding: 8px; alignment: start;
+                                                TextBtn { label: "Reset opacity"; clicked => { root.active-panel = 4; root.command("reset-opacity"); } }
+                                            }
+                                            }
                                     }
                                     if root.inspector-mode == 1 && root.grade-tab == 2: VerticalLayout { alignment: start; spacing: 0; padding-top: 8px;
-                                        SectionHead { label: "Color correction"; }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Exposure"; read: root.read-exposure; value <=> root.exposure; minimum: -5; maximum: 5; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("exposure", v); } }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Contrast"; read: root.read-contrast; value <=> root.contrast; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("contrast", v); } }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Highlights"; read: root.read-highlights; value <=> root.highlights; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("highlights", v); } }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Shadows"; read: root.read-shadows; value <=> root.shadows; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("shadows", v); } }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Temperature"; read: root.read-temperature; value <=> root.temperature; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("temperature", v); } }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Tint"; read: root.read-tint; value <=> root.tint; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("tint", v); } }
-                                        NumRow { focused => { root.active-panel = 4; } label: "Saturation"; read: root.read-saturation; value <=> root.saturation; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("saturation", v); } }
-                                        HorizontalLayout { padding: 8px; alignment: start; TextBtn { label: "Reset all color"; clicked => { root.active-panel = 4; root.command("reset-grade"); } } }
-                                        SectionHead { label: "Channel balance"; }
-                                        GradeWheel { focused => { root.active-panel = 4; } title: "Lift · shadows"; read-m: root.read-lift-m; read-r: root.read-lift-r; read-g: root.read-lift-g; read-b: root.read-lift-b; master <=> root.lift-m; red <=> root.lift-r; green <=> root.lift-g; blue <=> root.lift-b; changed(channel, v) => { root.active-panel = 4; root.adjust("lift-" + channel, v); } }
-                                        GradeWheel { focused => { root.active-panel = 4; } title: "Gamma · midtones"; read-m: root.read-gamma-m; read-r: root.read-gamma-r; read-g: root.read-gamma-g; read-b: root.read-gamma-b; master <=> root.gamma-m; red <=> root.gamma-r; green <=> root.gamma-g; blue <=> root.gamma-b; changed(channel, v) => { root.active-panel = 4; root.adjust("gamma-" + channel, v); } }
-                                        GradeWheel { focused => { root.active-panel = 4; } title: "Gain · highlights"; read-m: root.read-gain-m; read-r: root.read-gain-r; read-g: root.read-gain-g; read-b: root.read-gain-b; master <=> root.gain-m; red <=> root.gain-r; green <=> root.gain-g; blue <=> root.gain-b; changed(channel, v) => { root.active-panel = 4; root.adjust("gain-" + channel, v); } }
+                                        FoldHead { label: "Basic Correction"; open: root.basic-open; focused => { root.active-panel = 4; } toggled => { root.basic-open = !root.basic-open; } }
+                                        if root.basic-open: VerticalLayout { spacing: 0; alignment: start;
+                                            NumRow { focused => { root.active-panel = 4; } label: "Temperature"; read: root.read-temperature; value <=> root.temperature; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("temperature", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Tint"; read: root.read-tint; value <=> root.tint; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("tint", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Saturation"; read: root.read-saturation; value <=> root.saturation; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("saturation", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Exposure"; read: root.read-exposure; value <=> root.exposure; minimum: -5; maximum: 5; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("exposure", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Contrast"; read: root.read-contrast; value <=> root.contrast; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("contrast", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Highlights"; read: root.read-highlights; value <=> root.highlights; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("highlights", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Shadows"; read: root.read-shadows; value <=> root.shadows; minimum: -100; maximum: 100; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("shadows", v); } }
+                                            HorizontalLayout { padding: 8px; alignment: start; TextBtn { label: "Reset all color"; clicked => { root.active-panel = 4; root.command("reset-grade"); } } }
+                                        }
+                                        FoldHead { label: "Color Wheels"; open: root.wheels-open; focused => { root.active-panel = 4; } toggled => { root.wheels-open = !root.wheels-open; } }
+                                        if root.wheels-open: VerticalLayout { spacing: 0; alignment: start;
+                                            GradeWheel { focused => { root.active-panel = 4; } title: "Lift · shadows"; read-m: root.read-lift-m; read-r: root.read-lift-r; read-g: root.read-lift-g; read-b: root.read-lift-b; master <=> root.lift-m; red <=> root.lift-r; green <=> root.lift-g; blue <=> root.lift-b; changed(channel, v) => { root.active-panel = 4; root.adjust("lift-" + channel, v); } }
+                                            GradeWheel { focused => { root.active-panel = 4; } title: "Gamma · midtones"; read-m: root.read-gamma-m; read-r: root.read-gamma-r; read-g: root.read-gamma-g; read-b: root.read-gamma-b; master <=> root.gamma-m; red <=> root.gamma-r; green <=> root.gamma-g; blue <=> root.gamma-b; changed(channel, v) => { root.active-panel = 4; root.adjust("gamma-" + channel, v); } }
+                                            GradeWheel { focused => { root.active-panel = 4; } title: "Gain · highlights"; read-m: root.read-gain-m; read-r: root.read-gain-r; read-g: root.read-gain-g; read-b: root.read-gain-b; master <=> root.gain-m; red <=> root.gain-r; green <=> root.gain-g; blue <=> root.gain-b; changed(channel, v) => { root.active-panel = 4; root.adjust("gain-" + channel, v); } }
+                                        }
                                     }
                                     if root.inspector-mode == 2 && (root.grade-tab == 0 || root.grade-tab == 2): Text { text: "Select a video or image clip to adjust its picture."; x: 12px; width: parent.width - 24px; height: 64px; wrap: word-wrap; color: Palette.text-secondary; font-size: 12px; vertical-alignment: center; }
                                     if root.grade-tab == 1: VerticalLayout { alignment: start; spacing: 0; padding-top: 8px;
@@ -2008,7 +2097,7 @@ export component AppWindow inherits Window {
                                             }
                                             NumRow { focused => { root.active-panel = 4; } label: "Gain"; read: track.read-gain; value: track.gain; follow-model: true; model-value: track.gain; minimum: 0; maximum: 2; display-scale: 100; changed(v) => { root.active-panel = 4; root.mix-track(track.index, "gain", v); } }
                                             NumRow { focused => { root.active-panel = 4; } label: "Balance"; read: track.read-pan; value: track.pan; follow-model: true; model-value: track.pan; minimum: -1; maximum: 1; bipolar: true; display-scale: 100; changed(v) => { root.active-panel = 4; root.mix-track(track.index, "pan", v); } }
-                                            Rectangle { height: 8px; Rectangle { y: 7px; height: 1px; width: 100%; background: Palette.bg3; } }
+                                            Rectangle { height: 8px; }
                                         }
                                         if root.mixer-tracks.length == 0: Text { text: "Add an audio track to mix your sequence."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; height: 56px; vertical-alignment: center; }
                                         HorizontalLayout { padding: 8px; alignment: start; TextBtn { label: "Add audio track"; clicked => { root.active-panel = 4; root.command("add-audio"); keys.focus(); } } }
@@ -2042,10 +2131,10 @@ export component AppWindow inherits Window {
                 }
             }
 
-            Rectangle { height: 8px; background: divider.pressed || divider.has-hover ? Palette.bg3 : Palette.bg0;
-                Rectangle { y: 3px; height: 1px; width: 100%; background: divider.pressed || divider.has-hover ? Palette.accent : Palette.bg3; }
+            Rectangle { height: root.panel-split-h; clip: true; background: divider.pressed || divider.has-hover ? Palette.bg3 : Palette.bg0;
+                Rectangle { y: 3px; height: 1px; width: 100%; background: divider.pressed || divider.has-hover ? Palette.accent : transparent; }
                 divider := LiveTouchArea {
-                    mouse-cursor: ns-resize;
+                    enabled: root.expanded-panel < 0; mouse-cursor: ns-resize;
                     property <float> start-ratio;
                     property <length> start-y;
                     pointer-event(event) => { if (event.kind == PointerEventKind.down) { self.start-ratio = root.upper-ratio; self.start-y = self.mouse-y + root.upper-h; } }
@@ -2053,9 +2142,9 @@ export component AppWindow inherits Window {
                 }
             }
 
-            Rectangle { height: root.time-h; background: Palette.bg0; clip: true;
+            if root.expanded-panel != 1: Rectangle { height: root.time-h; background: Palette.bg0; clip: true;
                 HorizontalLayout { spacing: 0;
-                    if root.workspace == 0 && !root.project-top: MediaBin { width: root.bottom-bin-w; active: root.active-panel == 2; activated => { root.active-panel = 2; } dockable: true; dock-panel(x, y) => { root.dock-pane(false, x, y); }
+                    if root.workspace == 0 && !root.project-top && root.expanded-panel < 0: MediaBin { width: root.bottom-bin-w; active: root.active-panel == 2; activated => { root.active-panel = 2; } dockable: true; dock-panel(x, y) => { root.dock-pane(false, x, y); }
                         selected-count: root.project-selected-count; sort-column: root.media-sort-column; sort-descending: root.media-sort-descending;
                         select-media(id, ctrl, shift) => { root.select-media(id, ctrl, shift); } sort-media(column) => { root.sort-media(column); }
                         bin-items: root.bin-items; has-media: root.has-media; armed-kind: root.armed-kind;
@@ -2065,7 +2154,7 @@ export component AppWindow inherits Window {
                         command(action) => { root.command(action); } pick(kind, id) => { root.pick(kind, id); } focus-editor => { keys.focus(); }
                         media-drag(id, phase, x, y) => { root.media-drag(id, phase, x, y); }
                     }
-                    if root.workspace == 0 && root.project-top: SourcePane { width: root.bottom-bin-w; active: root.active-panel == 0; activated => { root.active-panel = 0; } dockable: true; dock-panel(x, y) => { root.dock-pane(true, x, y); }
+                    if root.workspace == 0 && root.project-top && root.expanded-panel < 0: SourcePane { width: root.bottom-bin-w; active: root.active-panel == 0; activated => { root.active-panel = 0; } dockable: true; dock-panel(x, y) => { root.dock-pane(true, x, y); }
                         source-image: root.source-image; show-picture: root.show-source-picture; preparing: root.source-preparing; problem: root.source-problem; has-selected-media: root.has-selected-media; source-name: root.source-name; duration-tc: root.source-dur-tc;
                         cursor-tc: root.source-tc; cursor-text: root.source-timecode; usable: root.source-usable; playing: root.source-playing; position: root.source-position;
                         begin-timecode => { root.timecode-begin(true); } seek-timecode(text) => { root.timecode-seek(true, text) }
@@ -2076,7 +2165,7 @@ export component AppWindow inherits Window {
                         source-resized(w, h) => { if (w > 1 && h > 1) { root.source-px-width = w; root.source-px-height = h; } }
                         command(action) => { root.command(action); } focus-editor => { keys.focus(); }
                     }
-                    if root.workspace == 0: Rectangle { width: 5px; background: project-divider.pressed || project-divider.has-hover ? Palette.bg3 : Palette.bg0;
+                    if root.workspace == 0 && root.expanded-panel < 0: Rectangle { width: 5px; background: project-divider.pressed || project-divider.has-hover ? Palette.bg3 : Palette.bg0;
                         Rectangle { x: 2px; y: 0px; width: 1px; height: 100%; background: project-divider.pressed || project-divider.has-hover ? Palette.accent : Palette.bg3; }
                         project-divider := LiveTouchArea {
                             mouse-cursor: ew-resize;
@@ -2084,6 +2173,14 @@ export component AppWindow inherits Window {
                             property <length> start-x;
                             pointer-event(event) => { if (event.kind == PointerEventKind.down) { self.start-width = root.bottom-bin-w / 1px; self.start-x = self.absolute-position.x + self.mouse-x; } }
                             moved => { if (self.pressed) { if (root.project-top) { root.source-width = max(240, min((root.width - 745px) / 1px, self.start-width + (self.absolute-position.x + self.mouse-x - self.start-x) / 1px)); } else { root.project-width = max(240, min((root.width - 745px) / 1px, self.start-width + (self.absolute-position.x + self.mouse-x - self.start-x) / 1px)); } } }
+                        }
+                    }
+                    // Tool rail shares the timeline focus and command handlers.
+                    Rectangle { width: 36px; background: Palette.bg1;
+                        Rectangle { x: 35px; width: 1px; height: 100%; background: Palette.bg3; }
+                        VerticalLayout { padding-top: 32px; padding-left: 4px; padding-right: 4px; spacing: 4px; alignment: start;
+                            IconBtn { icon: @image-url("icons/selection.svg"); tooltip: "Selection tool · " + root.shortcut-hint("tool-select", root.shortcut-revision) + "\nSelect, move and trim clips."; armed: !root.tool-razor; clicked => { root.active-panel = 3; keys.focus(); root.command("tool-select"); } }
+                            IconBtn { icon: @image-url("icons/razor.svg"); tooltip: "Razor tool · " + root.shortcut-hint("tool-razor", root.shortcut-revision) + "\nClick a clip to cut at that position."; armed: root.tool-razor; clicked => { root.active-panel = 3; keys.focus(); root.command("tool-razor"); } }
                         }
                     }
                     Rectangle { horizontal-stretch: 1; background: Palette.bg0; clip: true;
@@ -2094,15 +2191,14 @@ export component AppWindow inherits Window {
                                     Image { width: 14px; height: 14px; source: @image-url("icons/sequence.svg"); colorize: root.active-panel == 3 ? Palette.accent : Palette.text-secondary; }
                                     Text { text: root.seq-name; color: Palette.text-primary; font-size: 12px; font-weight: 600; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; min-width: 0px; }
                                     TimecodeEntry { cells: root.bar-tc; value: root.timecode; enabled: root.has-clips; ink: Palette.accent; begin => { root.timecode-begin(false); root.active-panel = 3; } seek(text) => { root.timecode-seek(false, text) } finished => { root.active-panel = 3; keys.focus(); } }
+                                    IconBtn { icon: root.expanded-panel == 3 ? @image-url("icons/restore-panel.svg") : @image-url("icons/expand-panel.svg"); tooltip: (root.expanded-panel == 3 ? "Restore workspace" : "Expand Timeline") + " · " + root.shortcut-hint("toggle-panel-expand", root.shortcut-revision); retain-keyboard-focus: false; clicked => { root.active-panel = 3; keys.focus(); root.command("toggle-panel-expand"); } }
                                 }
-                                Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: root.active-panel == 3 ? Palette.accent : Palette.bg3; }
+                                Rectangle { y: parent.height - 1px; width: 100%; height: 1px; background: root.active-panel == 3 ? Palette.accent : transparent; }
                             }
                             Rectangle { height: 32px; background: Palette.bg2;
                                 LiveTouchArea { clicked => { root.active-panel = 3; keys.focus(); } }
-                                Rectangle { x: 0px; y: 30px; height: 2px; width: 100%; background: root.active-panel == 3 ? Palette.accent : Palette.bg3; }
-                                HorizontalLayout { padding-left: 4px; padding-right: 8px; spacing: 2px;
-                                    IconBtn { icon: @image-url("icons/selection.svg"); tooltip: "Selection tool · " + root.shortcut-hint("tool-select", root.shortcut-revision) + "\nSelect, move and trim clips."; armed: !root.tool-razor; clicked => { root.active-panel = 3; keys.focus(); root.command("tool-select"); } }
-                                    IconBtn { icon: @image-url("icons/razor.svg"); tooltip: "Razor tool · " + root.shortcut-hint("tool-razor", root.shortcut-revision) + "\nClick a clip to cut at that position."; armed: root.tool-razor; clicked => { root.active-panel = 3; keys.focus(); root.command("tool-razor"); } }
+                                Flickable { width: 100%; height: 32px; viewport-width: max(self.width, 724px); viewport-height: self.height;
+                                HorizontalLayout { width: parent.width; height: 32px; padding-left: 4px; padding-right: 8px; spacing: 2px;
                                     Rectangle { width: 9px; Rectangle { x: 4px; y: 7px; width: 1px; height: parent.height - 14px; background: Palette.bg3; } }
                                     IconBtn { icon: @image-url("icons/snap.svg"); tooltip: "Snapping · " + root.shortcut-hint("snap", root.shortcut-revision) + "\nAlign edits to nearby clip edges and the playhead."; armed: root.snap-on; clicked => { root.active-panel = 3; keys.focus(); root.command("snap"); } }
                                     IconBtn { icon: @image-url("icons/link.svg"); tooltip: "Linked selection · " + root.shortcut-hint("linked-selection", root.shortcut-revision) + "\nSelect linked video and audio together; does not create links."; armed: root.linked-on; clicked => { root.active-panel = 3; keys.focus(); root.command("linked-selection"); } }
@@ -2126,6 +2222,7 @@ export component AppWindow inherits Window {
                                     IconBtn { icon: @image-url("icons/zoom-in.svg"); tooltip: "Zoom in · " + root.shortcut-hint("zoom-in", root.shortcut-revision) + "\nInspect a shorter range of the timeline."; clicked => { root.active-panel = 3; keys.focus(); root.command("zoom-in"); } }
                                     IconBtn { icon: @image-url("icons/fit.svg"); tooltip: "Fit sequence · " + root.shortcut-hint("zoom-fit", root.shortcut-revision) + "\nShow the full sequence in the timeline."; clicked => { root.active-panel = 3; keys.focus(); root.command("zoom-fit"); } }
                                     Rectangle { horizontal-stretch: 1; }
+                                }
                                 }
                             }
 Rectangle { height: 20px; background: Palette.bg0; clip: true;
@@ -2158,7 +2255,7 @@ Rectangle { height: 20px; background: Palette.bg0; clip: true;
                                             head-touch := LiveTouchArea { clicked => { root.active-panel = 3; root.pick("track", head.index); keys.focus(); } scroll-event(event) => { root.scroll-tracks(event.delta-y / 1px, event.delta-x / 1px, 0, event.modifiers.control, event.modifiers.shift); accept } }
                                             Rectangle { y: (parent.height - 28px) / 2; height: 28px; width: 100%;
                                                 HorizontalLayout { padding-left: 4px; spacing: 2px; alignment: start;
-                                                    IconBtn { tooltip: head.muted ? "Unmute track" : "Mute track"; icon: @image-url("icons/mute.svg"); armed: head.muted; clicked => { root.active-panel = 3; root.pick("mute", head.index); keys.focus(); } }
+                                                    IconBtn { tooltip: head.video ? (head.muted ? "Show video track" : "Hide video track") : (head.muted ? "Unmute audio track" : "Mute audio track"); icon: head.video ? @image-url("icons/visibility.svg") : @image-url("icons/mute.svg"); armed: head.muted; clicked => { root.active-panel = 3; root.pick("mute", head.index); keys.focus(); } }
                                                     if !head.video: TextBtn { label: "S"; width: 26px; tooltip: head.solo ? "Unsolo track" : "Solo track"; background: head.solo ? Palette.accent-muted : Palette.bg2; clicked => { root.active-panel = 3; root.pick("solo", head.index); keys.focus(); } }
                                                     IconBtn { tooltip: head.locked ? "Unlock track" : "Lock track"; icon: @image-url("icons/lock.svg"); armed: head.locked; clicked => { root.active-panel = 3; root.pick("lock", head.index); keys.focus(); } }
                                                     Text { text: head.name; color: Palette.text-primary; font-size: 12px; font-weight: 500; horizontal-alignment: left; vertical-alignment: center; }
@@ -2168,7 +2265,7 @@ Rectangle { height: 20px; background: Palette.bg0; clip: true;
                                     }
                                     Rectangle { horizontal-stretch: 1; background: Palette.bg1; clip: true;
 
-for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; height: max(lane.h * 1px, 28px); width: 100%; background: lane.video ? #242426 : #202522; Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: #343438; } }
+for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; height: max(lane.h * 1px, 28px); width: 100%; background: lane.video ? #222426 : #20231F; Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: #343438; } }
                                 if !root.has-clips: Text { text: "Drag media onto a track to start editing."; x: 16px; y: parent.height * 0.35; width: parent.width - 32px; height: 48px; wrap: word-wrap; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                                         for clip in root.clips: Rectangle {
                                             x: clip.x * 1px; y: (clip.y - root.timeline-scroll-y) * 1px + 2px; width: max(clip.w * 1px, 2px); height: max(clip.h * 1px - 4px, 8px); border-radius: 0px;
@@ -2256,192 +2353,223 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                             }
                         }
                     }
+                    // Live stereo output, visible while editing regardless of inspector tab.
+                    Rectangle { width: 60px; background: Palette.bg1;
+                        Rectangle { width: 1px; height: 100%; background: Palette.bg3; }
+                        VerticalLayout { padding: 5px; spacing: 4px;
+                            TextBtn { label: "Mix"; height: 23px; tooltip: "Open audio mixer"; clicked => { if (root.workspace == 1) { root.command("workspace-edit"); } root.active-panel = 4; root.grade-tab = 1; } }
+                            HorizontalLayout { spacing: 5px; vertical-stretch: 1;
+                                VerticalMeter { level: root.meter-left; held: root.meter-hold-left; clipped: root.meter-clip-left; }
+                                VerticalMeter { level: root.meter-right; held: root.meter-hold-right; clipped: root.meter-clip-right; }
+                            }
+                            Text { text: "L     R"; color: Palette.text-secondary; font-size: 10px; horizontal-alignment: center; height: 14px; }
+                            Text { text: root.meter-read-left; color: root.meter-clip-left ? Palette.status-error : Palette.text-secondary; font-size: 10px; horizontal-alignment: center; height: 14px; }
+                            Text { text: root.meter-read-right; color: root.meter-clip-right ? Palette.status-error : Palette.text-secondary; font-size: 10px; horizontal-alignment: center; height: 14px; }
+                            TextBtn { label: "Reset"; height: 22px; tooltip: "Clear peak hold and clipping indicators"; clicked => { root.command("clear-meters"); } }
+                        }
+                    }
+
                 }
             }
                 }
 
                 if root.page == 1: Rectangle {
                     width: parent.width; height: parent.height; background: Palette.bg0;
-                    property <length> queue-width: min(320px, self.width * 0.24);
-                    property <length> settings-width: min(380px, self.width * 0.31);
-                    Rectangle { x: 0px; y: 0px; width: parent.queue-width; height: 100%; background: Palette.bg1;
+                    property <length> settings-width: min(480px, max(408px, self.width * 0.37));
+                    Rectangle { x: 0px; y: 0px; width: parent.width - parent.settings-width - 6px; height: 100%; background: Palette.bg1;
                         VerticalLayout { spacing: 0;
-                            PanelHead { label: "Render queue"; detail: root.queue-items.length == 0 ? "" : "" + root.queue-items.length + " jobs"; }
-                            Rectangle { height: 36px; background: Palette.bg1;
-                                HorizontalLayout { padding-left: 8px; padding-right: 8px; alignment: start;
-                                    TextBtn { label: "Start queue"; enabled: root.queue-pending && !root.export-busy; clicked => { root.command("render-queue"); } }
-                                }
-                            }
-                            Rectangle { vertical-stretch: 1; min-height: 0px; clip: true;
-                                if root.queue-items.length == 0: VerticalLayout { padding: 16px; spacing: 8px; alignment: center;
-                                    Text { text: "No queued exports"; color: Palette.text-primary; font-size: 13px; font-weight: 600; horizontal-alignment: center; }
-                                    Text { text: "Choose your settings, then add an export to the queue. Each job keeps its own edit and settings."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; horizontal-alignment: center; }
+                            PanelHead { label: "Sequence preview"; detail: root.seq-name; }
+                            Rectangle { vertical-stretch: 1; min-height: 100px; background: Palette.bg0; clip: true;
+                                if root.show-picture && root.has-clips: Image { width: 100%; height: 100%; source: root.viewer-image; image-fit: contain; horizontal-alignment: center; vertical-alignment: center; preferred-width: 0px; preferred-height: 0px; }
+                                PreviewContext { available-width: parent.width; available-height: parent.height; preparing: root.program-preparing; problem: root.program-problem; }
+                                if !root.has-clips: VerticalLayout { padding: 24px; alignment: center; spacing: 8px;
+                                    Rectangle { vertical-stretch: 1; }
+                                    Text { text: "Nothing to export yet"; color: Palette.text-primary; font-size: 15px; font-weight: 600; horizontal-alignment: center; }
+                                    Text { text: "Add media to the timeline, then return here."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; horizontal-alignment: center; }
+                                    HorizontalLayout { alignment: center; SecBtn { label: "Back to Edit"; clicked => { root.command("workspace-edit"); } } }
                                     Rectangle { vertical-stretch: 1; }
                                 }
-                                if root.queue-items.length > 0: Flickable {
-                                    width: 100%; height: 100%; viewport-width: self.width; viewport-height: max(self.height, queue-list.preferred-height);
-                                    queue-list := VerticalLayout { width: parent.width; spacing: 0; alignment: start;
-                                        for job in root.queue-items: Rectangle { height: 112px; background: Palette.bg1;
-                                            Rectangle { x: 0px; y: parent.height - 1px; width: 100%; height: 1px; background: Palette.bg3; }
-                                            VerticalLayout { padding: 8px; spacing: 3px;
-                                                Text { text: job.name; color: Palette.text-primary; font-weight: 600; font-size: 12px; overflow: elide; height: 18px; }
-                                                Text { text: job.output; color: Palette.text-secondary; font-size: 11px; overflow: elide; height: 18px; }
-                                                TextBtn { label: job.status; tooltip: "View full export details"; height: 22px; horizontal-stretch: 1; min-width: 0px; clicked => { root.export-details = job.status; root.show-export-details = true; } }
-                                                HorizontalLayout { alignment: start; spacing: 8px;
-                                                    if job.retryable: TextBtn { label: "Retry"; clicked => { root.pick("queue-retry", job.id); } }
-                                                    TextBtn { label: "Remove"; enabled: job.removable; clicked => { root.pick("queue-remove", job.id); } }
+                            }
+                            Rectangle { height: 38px; background: Palette.bg2;
+                                HorizontalLayout { padding-left: 12px; padding-right: 12px; spacing: 6px;
+                                    TcRun { cells: root.program-tc; main: false; ink: Palette.accent; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    IconBtn { enabled: root.has-clips && !root.export-busy; icon: @image-url("icons/step-back.svg"); tooltip: "Previous frame"; clicked => { root.active-panel = 1; root.command("step-back"); } }
+                                    PlayBtn { enabled: root.has-clips && !root.export-busy; stopped: root.shuttle == "STOP"; tooltip: "Play / pause sequence"; clicked => { root.active-panel = 1; root.command("play-toggle"); } }
+                                    IconBtn { enabled: root.has-clips && !root.export-busy; icon: @image-url("icons/step-forward.svg"); tooltip: "Next frame"; clicked => { root.active-panel = 1; root.command("step-fwd"); } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    TcRun { cells: root.duration-tc; main: false; ink: Palette.text-secondary; }
+                                }
+                            }
+                            Rectangle { height: 65px;
+                                VerticalLayout { padding-left: 14px; padding-right: 14px; padding-top: 10px; padding-bottom: 10px; spacing: 4px;
+                                    Text { text: "Output · " + root.export-width + " × " + root.export-height + " · " + (root.export-fps >= 0 && root.export-fps < root.export-rates.length ? root.export-rates[root.export-fps].text : "—") + " fps"; color: Palette.text-primary; font-size: 12px; overflow: elide; }
+                                    Text { text: root.export-range-label; color: Palette.text-secondary; font-size: 12px; overflow: elide; }
+                                }
+                            }
+                            if root.export-busy || root.export-result-state > 0: Rectangle {
+                                height: root.export-busy || root.export-result-state != 1 ? 90px : 120px; background: Palette.bg2;
+                                VerticalLayout { padding: 12px; spacing: 5px;
+                                    Text { text: root.export-busy ? (root.export-checking ? "Checking destination…" : root.export-cancelling ? "Cancelling export…" : root.export-preparing ? "Preparing export…" : "Exporting video…") : root.export-result-state == 1 ? "Export complete" : root.export-result-state == 2 ? "Export failed" : "Export cancelled"; color: root.export-busy ? Palette.text-primary : root.export-result-state == 1 ? Palette.status-ok : root.export-result-state == 2 ? Palette.status-error : Palette.text-secondary; font-size: 13px; font-weight: 600; height: 20px; }
+                                    ExportPath { value: root.export-busy ? root.export-active-path : root.export-result-path; }
+                                    if !root.export-busy && root.export-result-state == 1: HorizontalLayout { alignment: start; spacing: 8px;
+                                        SecBtn { label: "Open video"; clicked => { root.command("open-last-export"); } }
+                                        SecBtn { label: "Show in folder"; clicked => { root.command("reveal-last-export"); } }
+                                    }
+                                }
+                            }
+                            Rectangle { height: root.queue-items.length == 0 ? 78px : min(196px, root.height * 0.26);
+                                VerticalLayout { spacing: 0;
+                                    Rectangle { height: 36px;
+                                        HorizontalLayout { padding-left: 12px; padding-right: 8px; spacing: 8px;
+                                            Text { text: "Export queue" + (root.queue-items.length == 0 ? "" : " · " + root.queue-items.length); color: Palette.text-primary; font-size: 12px; font-weight: 600; vertical-alignment: center; }
+                                            Rectangle { horizontal-stretch: 1; }
+                                            TextBtn { label: "Clear finished"; enabled: root.queue-has-finished && !root.export-busy; clicked => { root.command("clear-completed"); } }
+                                            SecBtn { label: "Start queue"; enabled: root.queue-pending && !root.export-busy; clicked => { root.command("render-queue"); } }
+                                        }
+                                    }
+                                    if root.queue-items.length == 0: Text { x: 14px; width: parent.width - 28px; height: 36px; text: "Add to queue to save an export and run it later."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                                    if root.queue-items.length > 0: Flickable {
+                                        vertical-stretch: 1; min-height: 0px; viewport-width: self.width; viewport-height: max(self.height, queue-list.preferred-height);
+                                        queue-list := VerticalLayout { width: parent.width; padding: 6px; spacing: 6px; alignment: start;
+                                            for job in root.queue-items: Rectangle { height: 116px; background: Palette.bg2; border-radius: 3px;
+                                                VerticalLayout { padding: 8px; spacing: 3px;
+                                                    HorizontalLayout { spacing: 8px;
+                                                        Text { text: job.name; color: Palette.text-primary; font-weight: 600; font-size: 12px; overflow: elide; height: 18px; horizontal-stretch: 1; min-width: 0px; }
+                                                        Text { text: job.state-label; color: job.complete ? Palette.status-ok : job.state-label == "Failed" ? Palette.status-error : Palette.text-secondary; font-size: 11px; height: 18px; }
+                                                    }
+                                                    ExportPath { value: job.output; height: 32px; }
+                                                    HorizontalLayout { alignment: start; spacing: 6px; height: 28px;
+                                                        if job.complete: SecBtn { label: "Open video"; clicked => { root.pick("queue-open", job.id); } }
+                                                        if job.complete: SecBtn { label: "Show in folder"; clicked => { root.pick("queue-reveal", job.id); } }
+                                                        if job.retryable: SecBtn { label: "Retry"; enabled: !root.export-busy; clicked => { root.pick("queue-retry", job.id); } }
+                                                        TextBtn { label: "Details"; tooltip: job.status; clicked => { root.export-details = job.output + "\n\n" + job.status; root.show-export-details = true; } }
+                                                        Rectangle { horizontal-stretch: 1; }
+                                                        TextBtn { label: "Remove"; enabled: job.removable && !root.export-busy; tooltip: "Remove this job from the queue. Keeps the exported file."; clicked => { root.pick("queue-remove", job.id); } }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                            Rectangle { height: 44px; background: Palette.bg2;
-                                HorizontalLayout { padding-left: 8px; alignment: start;
-                                    TextBtn { label: "Clear finished jobs"; enabled: root.queue-has-finished; clicked => { root.command("clear-completed"); } }
-                                }
-                            }
-                        }
-                    }
-                    Rectangle { x: parent.queue-width + 5px; y: 0px; width: parent.width - parent.queue-width - parent.settings-width - 10px; height: 100%; background: Palette.bg1;
-                        VerticalLayout { spacing: 0;
-                            PanelHead { label: "Preview"; detail: root.seq-name; }
-                            export-frame := Rectangle { vertical-stretch: 1; min-height: 100px; background: Palette.bg0; clip: true;
-                                if root.show-picture && root.has-clips: Image { width: 100%; height: 100%; source: root.viewer-image; image-fit: contain; horizontal-alignment: center; vertical-alignment: center; preferred-width: 0px; preferred-height: 0px; }
-                                PreviewContext { available-width: parent.width; available-height: parent.height; preparing: root.program-preparing; problem: root.program-problem; }
-                                if !root.has-clips: VerticalLayout { padding: 24px; alignment: center; spacing: 8px;
-                                    Rectangle { vertical-stretch: 1; }
-                                    Text { text: "Nothing to export yet"; color: Palette.text-primary; font-size: 15px; font-weight: 600; horizontal-alignment: center; }
-                                    Text { text: "Add media to the timeline to prepare an export."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; horizontal-alignment: center; }
-                                    HorizontalLayout { alignment: center; SecBtn { label: "Return to Edit"; clicked => { root.command("workspace-edit"); } } }
-                                    Rectangle { vertical-stretch: 1; }
-                                }
-                            }
-                            Rectangle { height: 24px; background: Palette.bg2;
-                                HorizontalLayout { padding-left: 8px; padding-right: 8px;
-                                    TcRun { cells: root.program-tc; main: false; ink: Palette.accent; }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    TcRun { cells: root.duration-tc; main: false; ink: Palette.text-secondary; }
-                                }
-                            }
-                            Rectangle { height: 34px; background: Palette.bg2;
-                                HorizontalLayout { spacing: 4px; alignment: center;
-                                    IconBtn { enabled: root.has-clips; icon: @image-url("icons/step-back.svg"); tooltip: "Previous frame · " + root.shortcut-hint("step-back", root.shortcut-revision); clicked => { root.active-panel = 1; root.command("step-back"); } }
-                                    PlayBtn { enabled: root.has-clips; stopped: root.shuttle == "STOP"; tooltip: "Play / pause · " + root.shortcut-hint("play-toggle", root.shortcut-revision); clicked => { root.active-panel = 1; root.command("play-toggle"); } }
-                                    IconBtn { enabled: root.has-clips; icon: @image-url("icons/step-forward.svg"); tooltip: "Next frame · " + root.shortcut-hint("step-fwd", root.shortcut-revision); clicked => { root.active-panel = 1; root.command("step-fwd"); } }
-                                }
-                            }
-                            Rectangle { height: 106px; background: Palette.bg1;
-                                VerticalLayout { padding: 12px; spacing: 6px; alignment: start;
-                                    Text { text: "Output summary"; color: Palette.text-primary; font-size: 12px; font-weight: 600; height: 20px; }
-                                    Text { text: "H.264 / MP4 · " + root.export-width + " × " + root.export-height + " · " + root.export-rates[root.export-fps].text + " fps"; color: Palette.text-secondary; font-size: 12px; height: 20px; overflow: elide; }
-                                    Text { text: root.export-inout ? "Range: In / Out" : "Range: Entire sequence"; color: Palette.text-secondary; font-size: 12px; height: 20px; }
-                                }
-                            }
                         }
                     }
                     Rectangle { x: parent.width - parent.settings-width; y: 0px; width: parent.settings-width; height: 100%; background: Palette.bg1;
-                        PanelHead { x: 0px; y: 0px; width: 100%; label: "Export settings"; }
-                        export-scroll := Flickable { x: 0px; y: 30px; width: parent.width - 8px; height: parent.height - 118px; viewport-width: self.width; viewport-height: max(self.height, export-settings.preferred-height);
-                            export-settings := VerticalLayout { padding: 8px; spacing: 6px; alignment: start; width: parent.width;
-                            HorizontalLayout { spacing: 8px; alignment: start;
-                                TextBtn { label: "Presets"; dropdown: true; expanded: root.export-presets-open; enabled: !root.export-busy; clicked => { root.export-presets-open = !root.export-presets-open; } }
-                                TextBtn { label: "Match sequence"; enabled: !root.export-busy; tooltip: "Use sequence dimensions and frame rate. Keeps your encoding quality and speed."; clicked => { root.command("preset-match"); } }
-                            }
-                            if root.export-presets-open: VerticalLayout { spacing: 0;
-                                MenuEntry { label: "Balanced · default"; clicked => { root.command("preset-medium"); root.export-presets-open = false; } }
-                                MenuEntry { label: "High quality"; clicked => { root.command("preset-high"); root.export-presets-open = false; } }
-                                MenuEntry { label: "Speed first · larger files"; clicked => { root.command("preset-fast"); root.export-presets-open = false; } }
-                                MenuEntry { label: "Smaller files"; clicked => { root.command("preset-compact"); root.export-presets-open = false; } }
-                                MenuEntry { label: "Match sequence"; clicked => { root.command("preset-match"); root.export-presets-open = false; } }
-                            }
-                            SetRow { label: "Format"; value: "H.264"; }
-                            SetRow { label: "Container"; value: "MP4"; }
-                            Rectangle { height: 28px;
-                                Text { text: "Render mode"; x: 0px; y: 0px; width: 108px; height: 100%; color: Palette.text-secondary; font-size: 12px; vertical-alignment: center; }
-                                ChoiceButton { x: 116px; width: parent.width - 116px; choices: [{text: "Balanced"}, {text: "Speed first"}, {text: "Smaller files"}]; selected: root.export-speed; enabled: !root.export-busy; chosen(index) => { root.export-speed = index; } }
-                            }
-                            Text { text: root.export-speed == 1 ? "Faster encoding can produce larger files." : root.export-speed == 2 ? "More encoding work improves compression." : "Good picture quality with responsive rendering."; color: Palette.text-secondary; font-size: 12px; height: 32px; wrap: word-wrap; }
-                            Rectangle { height: 28px;
-                                Text { text: "Encoder"; x: 0px; y: 0px; width: 108px; height: 100%; color: Palette.text-secondary; font-size: 12px; vertical-alignment: center; }
-                                ChoiceButton { x: 116px; width: parent.width - 116px; choices: [{text: "Auto · hardware when available"}, {text: "CPU · software"}, {text: "GPU · hardware required"}]; selected: root.export-encoder; enabled: !root.export-busy; chosen(index) => { root.export-encoder = index; } }
-                            }
-                            Text { text: root.export-encoder == 1 ? "Uses the CPU software encoder." : root.export-encoder == 2 ? "Requires a working GPU encoder. Effects may still use the CPU. Fails if GPU encoding is unavailable." : "Auto uses a verified hardware encoder when available, with CPU fallback."; color: Palette.text-secondary; font-size: 12px; height: root.export-encoder == 1 ? 20px : root.export-encoder == 2 ? 52px : 36px; wrap: word-wrap; }
-                            SectionHead { label: "Video"; }
-                            Rectangle { height: 28px;
-                                Text { text: "Width"; x: 0px; y: 0px; width: 108px; height: 28px; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: left; vertical-alignment: center; }
-                                Field { x: 116px; y: 0px; width: parent.width - 116px; value <=> root.export-width; }
-                            }
-                            Rectangle { height: 28px;
-                                Text { text: "Height"; x: 0px; y: 0px; width: 108px; height: 28px; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: left; vertical-alignment: center; }
-                                Field { x: 116px; y: 0px; width: parent.width - 116px; value <=> root.export-height; }
-                            }
-                            Rectangle { height: 28px;
-                                Text { text: "Frame rate"; x: 0px; y: 0px; width: 108px; height: 100%; color: Palette.text-secondary; font-size: 12px; vertical-alignment: center; }
-                                ChoiceButton { x: 116px; width: parent.width - 116px; choices: root.export-rates; suffix: " fps"; selected: root.export-fps; enabled: !root.export-busy; chosen(index) => { root.export-fps = index; } }
-                            }
-                            Rectangle { height: 28px;
-                                Text { text: "Range"; x: 0px; width: 108px; height: 100%; color: Palette.text-secondary; font-size: 12px; vertical-alignment: center; }
-                                ChoiceButton { x: 116px; width: parent.width - 116px; choices: [{text: "Entire sequence"}, {text: "In / Out"}]; selected: root.export-inout ? 1 : 0; enabled: !root.export-busy; chosen(index) => { root.export-inout = index == 1; } }
-                            }
-                            SetRow { label: "Quality target"; value: root.export-crf <= 18.5 ? "High" : root.export-crf < 23 ? "Balanced" : "Standard"; }
-                            if root.export-encoder == 1: SetRow { label: "CRF"; value: root.read-crf; }
-                            if root.export-encoder != 1: Text { text: "Quality targets vary by encoder."; color: Palette.text-secondary; font-size: 12px; height: 20px; wrap: word-wrap; }
-                            SectionHead { label: "Destination"; }
-                            Rectangle { height: 28px;
-                                Text { text: "Output name"; x: 0px; y: 0px; width: 108px; height: 28px; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
-                                Field { x: 116px; y: 0px; width: parent.width - 116px; value <=> root.export-path; }
-                            }
-                            Rectangle { height: 28px;
-                                SecBtn { x: 116px; y: 0px; label: "Browse"; clicked => { root.command("browse-export"); } }
-                            }
+                        Rectangle { x: 0px; y: 0px; width: 100%; height: 64px;
+                            VerticalLayout { padding-left: 16px; padding-right: 16px; padding-top: 12px; padding-bottom: 8px; spacing: 4px;
+                                Text { text: "Export video"; color: Palette.text-primary; font-size: 18px; font-weight: 600; }
+                                Text { text: "MP4 · H.264 video · AAC stereo audio"; color: Palette.text-secondary; font-size: 12px; }
                             }
                         }
-                        Rectangle { x: parent.width - 8px; y: 30px; width: 8px; height: parent.height - 118px; background: Palette.bg0;
-                            visible: export-scroll.viewport-height > export-scroll.height;
-                            Rectangle { x: 2px; width: 4px; border-radius: 2px; background: Palette.text-disabled;
-                                height: max(24px, parent.height * export-scroll.height / max(1px, export-scroll.viewport-height));
-                                y: max(0px, min(parent.height - self.height, (parent.height - self.height) * -export-scroll.viewport-y / max(1px, export-scroll.viewport-height - export-scroll.height)));
-                            }
-                        }
-                        Rectangle { x: 0px; y: parent.height - 88px; width: 100%; height: 88px; background: Palette.bg2;
-                            Rectangle { x: 8px; y: 8px; width: parent.width - 16px; height: 3px; background: Palette.bg3;
-                                Rectangle { x: 0px; y: 0px; width: parent.width * min(1, max(0, root.export-shown-progress)); height: 100%; background: Palette.accent; }
-                            }
-                            Rectangle { x: 8px; y: 16px; width: parent.width - 16px; height: 20px;
-                                Rectangle { x: 0px; y: 0px; width: max(0px, parent.width - (root.export-busy ? (root.export-preparing ? 89px : 42px) : 0px) - (root.export-busy && root.export-eta != "" ? 122px : 0px)); height: 100%; clip: true;
-                                    Text { x: 0px; y: 0px; width: 100%; height: 100%; text: root.export-message; color: Palette.text-secondary; font-size: 11px; overflow: elide; horizontal-alignment: left; vertical-alignment: center; }
+                        export-scroll := Flickable { x: 0px; y: 64px; width: parent.width - 10px; height: parent.height - 196px; viewport-width: self.width; viewport-height: max(self.height, export-settings.preferred-height);
+                            export-settings := VerticalLayout { padding-left: 16px; padding-right: 6px; padding-top: 0px; padding-bottom: 16px; spacing: 8px; alignment: start; width: parent.width;
+                                ExportHeading { text: "Destination"; }
+                                VerticalLayout { spacing: 4px;
+                                    ExportLabel { text: "File name"; }
+                                    Field { height: 32px; value <=> root.export-filename; enabled: !root.export-busy; placeholder: "My video.mp4"; edited => { root.command("export-form-changed"); } }
                                 }
-                                if root.export-busy && root.export-eta != "": Text { x: max(0px, parent.width - 164px); width: min(118px, parent.width); height: 100%; text: root.export-eta; color: Palette.text-secondary; font-size: 10px; horizontal-alignment: right; vertical-alignment: center; overflow: elide; }
-                                if root.export-busy: Text { x: parent.width - self.width; width: root.export-preparing ? 85px : 38px; height: 100%; text: (root.export-preparing ? root.export-preparation-label + " " : "") + root.export-percent + "%"; color: Palette.text-primary; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; }
-                                LiveTouchArea {
-                                    property <string> shown-message: "";
-                                    mouse-cursor: pointer;
-                                    clicked => { root.export-details = root.export-message; root.show-export-details = true; }
-                                    changed has-hover => {
-                                        if (self.has-hover && root.export-message != "") {
-                                            self.shown-message = root.export-message;
-                                            ToolHints.text = "Click to view export details\n" + self.shown-message;
-                                            ToolHints.x = self.absolute-position.x + self.width / 2;
-                                            ToolHints.y = self.absolute-position.y + self.height + 5px;
-                                            ToolHints.shown = true;
-                                        } else if (ToolHints.text == "Click to view export details\n" + self.shown-message) { ToolHints.shown = false; }
+                                VerticalLayout { spacing: 4px;
+                                    ExportLabel { text: "Save to folder"; }
+                                    Field { height: 32px; value <=> root.export-folder; enabled: !root.export-busy; placeholder: "Choose a folder"; edited => { root.command("export-form-changed"); } }
+                                }
+                                HorizontalLayout { spacing: 8px; alignment: start;
+                                    SecBtn { label: "Choose folder…"; enabled: !root.export-busy; clicked => { root.command("choose-export-folder"); } }
+                                    TextBtn { label: "Open folder"; enabled: root.export-folder != ""; tooltip: "Open this destination in your file manager"; clicked => { root.command("open-export-folder"); } }
+                                    TextBtn { label: "Save as…"; enabled: !root.export-busy; tooltip: "Choose both file name and location"; clicked => { root.command("browse-export"); } }
+                                }
+                                HorizontalLayout { spacing: 8px;
+                                    ExportHeading { text: "Video"; horizontal-stretch: 1; }
+                                    TextBtn { label: "Match sequence"; enabled: !root.export-busy; tooltip: "Use the sequence size and frame rate. Keeps your quality settings."; clicked => { root.command("preset-match"); } }
+                                }
+                                HorizontalLayout { spacing: 12px;
+                                    VerticalLayout { spacing: 4px;
+                                        ExportLabel { text: "Width · pixels"; }
+                                        Field { height: 32px; value <=> root.export-width; enabled: !root.export-busy; edited => { root.command("export-form-changed"); } }
+                                    }
+                                    VerticalLayout { spacing: 4px;
+                                        ExportLabel { text: "Height · pixels"; }
+                                        Field { height: 32px; value <=> root.export-height; enabled: !root.export-busy; edited => { root.command("export-form-changed"); } }
                                     }
                                 }
+                                HorizontalLayout { spacing: 12px;
+                                    VerticalLayout { spacing: 4px;
+                                        ExportLabel { text: "Frame rate"; }
+                                        ChoiceButton { height: 32px; choices: root.export-rates; suffix: " fps"; selected: root.export-fps; enabled: !root.export-busy; chosen(index) => { root.export-fps = index; root.command("export-form-changed"); } }
+                                    }
+                                    VerticalLayout { spacing: 4px;
+                                        ExportLabel { text: "Export range"; }
+                                        ChoiceButton { height: 32px; choices: [{text: "Entire sequence"}, {text: "In / Out marks"}]; selected: root.export-inout ? 1 : 0; enabled: !root.export-busy; chosen(index) => { root.export-inout = index == 1; root.command("export-form-changed"); } }
+                                    }
+                                }
+                                if root.export-inout && !root.export-range-available: Text { text: "Set In and Out marks in Edit to choose a range."; color: Palette.status-warning; font-size: 11px; wrap: word-wrap; }
+                                ExportHeading { text: "Quality & performance"; }
+                                HorizontalLayout { spacing: 12px;
+                                    VerticalLayout { spacing: 4px;
+                                        ExportLabel { text: "Picture quality"; }
+                                        ChoiceButton {
+                                            height: 32px; enabled: !root.export-busy;
+                                            property <[LabelItem]> quality-presets: [{text: "High"}, {text: "Balanced"}, {text: "Standard"}];
+                                            property <[LabelItem]> custom-presets: [{text: "High"}, {text: "Balanced"}, {text: "Standard"}, {text: "Custom · " + root.export-crf}];
+                                            choices: root.export-crf == 18 || root.export-crf == 21 || root.export-crf == 24 ? self.quality-presets : self.custom-presets;
+                                            selected: root.export-crf == 18 ? 0 : root.export-crf == 21 ? 1 : root.export-crf == 24 ? 2 : 3;
+                                            chosen(index) => { if (index < 3) { root.export-crf = index == 0 ? 18 : index == 1 ? 21 : 24; root.command("export-form-changed"); } }
+                                        }
+                                    }
+                                    VerticalLayout { spacing: 4px;
+                                        ExportLabel { text: "Encoding speed"; }
+                                        ChoiceButton { height: 32px; choices: [{text: "Balanced"}, {text: "Faster"}, {text: "Better compression"}]; selected: root.export-speed; enabled: !root.export-busy; chosen(index) => { root.export-speed = index; root.command("export-form-changed"); } }
+                                    }
+                                }
+                                Text { text: root.export-speed == 1 ? "Faster encoding can create larger files." : root.export-speed == 2 ? "Better compression takes longer and can reduce file size." : "Higher picture quality usually creates larger files."; color: Palette.text-secondary; font-size: 11px; wrap: word-wrap; }
+                                VerticalLayout { spacing: 4px;
+                                    ExportLabel { text: "Encoder"; }
+                                    ChoiceButton { height: 32px; choices: [{text: "Auto · recommended"}, {text: "Software · CPU"}, {text: "Hardware · GPU required"}]; selected: root.export-encoder; enabled: !root.export-busy; chosen(index) => { root.export-encoder = index; root.command("export-form-changed"); } }
+                                }
+                                Text { text: root.export-encoder == 1 ? "Uses the CPU. Quality uses CRF " + root.export-crf + "." : root.export-encoder == 2 ? "Requires a working GPU encoder. Stops with an error if unavailable." : "Uses a working GPU encoder when available; falls back to CPU if needed."; color: Palette.text-secondary; font-size: 11px; wrap: word-wrap; }
+                                Text { text: "Audio follows the timeline mix · 48 kHz · 192 kbps"; color: Palette.text-secondary; font-size: 11px; wrap: word-wrap; }
                             }
-                            HorizontalLayout { y: 44px; height: 36px; padding-left: 8px; padding-right: 8px; spacing: 6px;
-                                SecBtn { label: "Add to queue"; enabled: root.has-clips; clicked => { root.command("add-to-queue"); } }
-                                Rectangle { horizontal-stretch: 1; }
-                                if root.export-busy: SecBtn { label: root.export-cancelling ? "Cancelling…" : "Cancel"; enabled: !root.export-cancelling; clicked => { root.command("cancel-render"); } }
-                                PriBtn { label: root.export-busy ? "Rendering" : "Export now"; enabled: !root.export-busy && root.has-clips; clicked => { root.command("render"); } }
+                        }
+                        Rectangle { x: parent.width - 10px; y: 64px; width: 10px; height: parent.height - 196px; visible: export-scroll.viewport-height > export-scroll.height;
+                            property <length> thumb-height: max(26px, self.height * export-scroll.height / max(1px, export-scroll.viewport-height));
+                            property <length> thumb-y: (self.height - self.thumb-height) * -export-scroll.viewport-y / max(1px, export-scroll.viewport-height - export-scroll.height);
+                            Rectangle { x: 3px; y: parent.thumb-y; width: 4px; height: parent.thumb-height; border-radius: 2px; background: export-scroll-touch.has-hover ? Palette.text-secondary : Palette.text-disabled; }
+                            export-scroll-touch := LiveTouchArea {
+                                mouse-cursor: pointer;
+                                property <length> start-y;
+                                property <length> start-scroll;
+                                pointer-event(event) => { if (event.kind == PointerEventKind.down) {
+                                    if (self.mouse-y < parent.thumb-y || self.mouse-y > parent.thumb-y + parent.thumb-height) { export-scroll.viewport-y = -max(0px, min(export-scroll.viewport-height - export-scroll.height, (self.mouse-y - parent.thumb-height / 2) / max(1px, parent.height - parent.thumb-height) * (export-scroll.viewport-height - export-scroll.height))); }
+                                    self.start-y = self.mouse-y; self.start-scroll = export-scroll.viewport-y;
+                                } }
+                                moved => { if (self.pressed) { export-scroll.viewport-y = max(export-scroll.height - export-scroll.viewport-height, min(0px, self.start-scroll - (self.mouse-y - self.start-y) / max(1px, parent.height - parent.thumb-height) * (export-scroll.viewport-height - export-scroll.height))); } }
+                                scroll-event(event) => { export-scroll.viewport-y = max(export-scroll.height - export-scroll.viewport-height, min(0px, export-scroll.viewport-y + event.delta-y)); accept }
+                            }
+                        }
+                        Rectangle { y: parent.height - 132px; width: 100%; height: 132px; background: Palette.bg2;
+                            VerticalLayout { padding: 12px; spacing: 6px;
+                                if root.export-busy && !root.export-checking: Rectangle { height: 3px; background: Palette.bg3;
+                                    Rectangle { width: parent.width * min(1, max(0, root.export-shown-progress)); height: 100%; background: Palette.accent; }
+                                }
+                                Text { text: root.export-busy ? (root.export-checking ? "Checking the destination folder…" : root.export-cancelling ? "Stopping safely…" : (root.export-preparing ? root.export-preparation-label + " · " : "Exporting · ") + root.export-percent + "%" + (root.export-eta == "" ? "" : " · " + root.export-eta)) : root.export-form-error != "" ? root.export-form-error : root.has-clips ? "Ready to export" : "Add clips to the timeline to export."; color: !root.export-busy && root.export-form-error != "" ? Palette.status-warning : Palette.text-primary; font-size: 12px; wrap: word-wrap; height: 34px; }
+                                HorizontalLayout { spacing: 4px; height: 22px;
+                                    Text { text: root.export-busy ? "Settings are locked while exporting." : root.export-message; color: Palette.text-secondary; font-size: 11px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; min-width: 0px; }
+                                    TextBtn { label: "Details"; enabled: root.export-message != "" || root.export-form-error != ""; tooltip: "Read the full export status or error"; clicked => { root.export-details = !root.export-busy && root.export-form-error != "" ? root.export-form-error : root.export-message; root.show-export-details = true; } }
+                                }
+                                HorizontalLayout { spacing: 8px; height: 32px;
+                                    if !root.export-busy: SecBtn { label: "Add to queue"; height: 32px; enabled: root.export-ready; clicked => { root.command("add-to-queue"); } }
+                                    if root.export-busy: SecBtn { label: root.export-cancelling ? "Cancelling…" : "Cancel export"; height: 32px; enabled: !root.export-cancelling; clicked => { root.command("cancel-render"); } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    PriBtn { label: root.export-busy ? "Exporting…" : "Export now"; height: 32px; enabled: !root.export-busy && root.export-ready; clicked => { root.command("render"); } }
+                                }
                             }
                         }
                     }
                 }
+
             }
 
             Rectangle { height: 22px; background: Palette.bg2; border-radius: 0px;
-                Rectangle { height: 1px; width: 100%; background: Palette.bg3; }
                 HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 12px;
                     Text { text: root.sequence-label; color: Palette.text-primary; font-size: 11px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; }
                     if root.show-status-extra && !root.import-busy: Text { text: root.playback-label; color: Palette.text-secondary; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
@@ -2474,8 +2602,8 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
             }
         }
 
-        if root.open-menu != 0 || root.filter-open || root.quality-open: LiveTouchArea { x: 0px; y: 0px; width: 100%; height: 100%; z: 2; clicked => { root.open-menu = 0; root.filter-open = false; root.quality-open = false; keys.focus(); } }
-        if root.open-menu == 1: KeyboardMenu { x: min(0px, root.width - self.width - 8px); y: 30px; z: 3; width: min(300px, root.width - 16px); menu-id: 1;
+        if root.open-menu != 0 || root.filter-open || root.quality-open: LiveTouchArea { x: 0px; y: root.open-menu != 0 ? 30px : 0px; width: 100%; height: parent.height - self.y; z: 2; clicked => { root.open-menu = 0; root.filter-open = false; root.quality-open = false; keys.focus(); } }
+        if root.open-menu == 1: KeyboardMenu { x: min(0px, root.width - self.width - 8px); y: 30px; z: 3; width: min(360px, root.width - 16px); menu-id: 1;
             items: [
                 {label: "New project", hint: root.shortcut-hint("new", root.shortcut-revision), enabled: true, divider: false},
                 {label: "Open project", hint: root.shortcut-hint("open", root.shortcut-revision), enabled: true, divider: false},
@@ -2694,12 +2822,14 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
         if root.show-export-details: Rectangle { width: 100%; height: 100%; z: 8; background: #00000088; LiveTouchArea { } }
         if root.show-export-details: Rectangle {
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-            width: min(680px, parent.width - 64px); height: min(440px, parent.height - 96px); z: 9;
+            width: min(680px, parent.width - 64px); height: min(max(184px, export-detail-text.preferred-height + 128px), parent.height - 96px); z: 9;
             background: Palette.bg1; border-width: 1px; border-color: Palette.bg3; border-radius: 4px;
             VerticalLayout { padding: 20px; spacing: 16px;
                 Text { text: "Export details"; color: Palette.text-primary; font-size: 16px; font-weight: 600; }
-                Flickable { vertical-stretch: 1; interactive: false; viewport-width: self.width; viewport-height: max(self.height, export-detail-text.preferred-height);
-                    export-detail-text := TextInput { width: parent.width; height: self.preferred-height; text: root.export-details; color: Palette.text-primary; font-size: 12px; wrap: word-wrap; read-only: true; single-line: false; selection-background-color: Palette.accent-muted; selection-foreground-color: Palette.text-primary; }
+                Rectangle { vertical-stretch: 1; min-height: 0px; clip: true;
+                    Flickable { width: 100%; height: 100%; viewport-width: self.width; viewport-height: max(self.height, export-detail-text.preferred-height);
+                        export-detail-text := TextInput { x: 0px; y: 0px; width: parent.width; height: self.preferred-height; text: root.export-details; color: Palette.text-primary; font-size: 12px; wrap: word-wrap; read-only: true; single-line: false; selection-background-color: Palette.accent-muted; selection-foreground-color: Palette.text-primary; }
+                    }
                 }
                 HorizontalLayout { alignment: end; spacing: 8px;
                     SecBtn { label: "Copy details"; clicked => { export-detail-text.select-all(); export-detail-text.copy(); } }

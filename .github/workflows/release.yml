@@ -1,5 +1,5 @@
 # Tag-triggered multi-OS release. Jobs listed Windows → Linux → macOS (priority).
-# FFmpeg URLs are pinned to concrete autobuild/version assets (not *-latest-*).
+# FFmpeg archive bytes are pinned in packaging/ffmpeg-lock.json; not source-reproducible.
 name: Release
 
 on:
@@ -9,14 +9,6 @@ on:
 
 permissions:
   contents: write
-
-env:
-  # BtbN FFmpeg-Builds 8.1 GPL static — pin tag + filename together when upgrading
-  FFMPEG_WIN_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-16-13-04/ffmpeg-n8.1.3-18-g46d899d7a0-win64-gpl-8.1.zip
-  FFMPEG_LINUX_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-16-13-04/ffmpeg-n8.1.3-18-g46d899d7a0-linux64-gpl-8.1.tar.xz
-  # macOS Apple Silicon: versioned archives.
-  FFMPEG_MAC_ARM_FFMPEG_URL: https://www.osxexperts.net/ffmpeg711arm.zip
-  FFMPEG_MAC_ARM_FFPROBE_URL: https://www.osxexperts.net/ffprobe711arm.zip
 
 jobs:
   version:
@@ -49,18 +41,12 @@ jobs:
       - name: Install NSIS
         run: choco install nsis -y --no-progress
 
-      - name: Download pinned FFmpeg (win64)
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path packaging/cache | Out-Null
-          $zip = "packaging/cache/ffmpeg-win64.zip"
-          Invoke-WebRequest -Uri $env:FFMPEG_WIN_URL -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath packaging/cache/ffmpeg-win64 -Force
-          $bin = Get-ChildItem -Path packaging/cache/ffmpeg-win64 -Recurse -Filter ffmpeg.exe |
-            Select-Object -First 1 -ExpandProperty DirectoryName
-          if (-not $bin) { throw "ffmpeg.exe not found in FFmpeg archive" }
-          Copy-Item (Join-Path $bin "ffmpeg.exe") packaging/cache/ffmpeg.exe
-          Copy-Item (Join-Path $bin "ffprobe.exe") packaging/cache/ffprobe.exe
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare checksum-verified FFmpeg (win64)
+        run: python packaging/ffmpeg.py windows-x86_64
 
       - name: Build release
         run: cargo build --release --locked
@@ -71,9 +57,10 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           New-Item -ItemType Directory -Force -Path packaging/stage, dist | Out-Null
           Copy-Item target/release/quaternio.exe packaging/stage/quaternio.exe
-          Copy-Item packaging/cache/ffmpeg.exe packaging/stage/ffmpeg.exe
-          Copy-Item packaging/cache/ffprobe.exe packaging/stage/ffprobe.exe
+          Copy-Item packaging/cache/prepared/ffmpeg.exe packaging/stage/ffmpeg.exe
+          Copy-Item packaging/cache/prepared/ffprobe.exe packaging/stage/ffprobe.exe
           Copy-Item LICENSE packaging/stage/LICENSE
+          Copy-Item -Recurse packaging/cache/prepared/FFmpeg-notices packaging/stage/FFmpeg-notices
 
           $portable = "dist/Quaternio-Windows-Portable-$tag.zip"
           if (Test-Path $portable) { Remove-Item $portable }
@@ -121,17 +108,12 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Download pinned FFmpeg (linux64)
-        run: |
-          mkdir -p packaging/cache
-          curl -L --fail --retry 3 -o packaging/cache/ffmpeg-linux64.tar.xz "$FFMPEG_LINUX_URL"
-          mkdir -p packaging/cache/ffmpeg-linux64
-          tar -xJf packaging/cache/ffmpeg-linux64.tar.xz -C packaging/cache/ffmpeg-linux64
-          BIN=$(find packaging/cache/ffmpeg-linux64 -type f -name ffmpeg | head -n1 | xargs dirname)
-          test -n "$BIN"
-          cp "$BIN/ffmpeg" packaging/cache/ffmpeg
-          cp "$BIN/ffprobe" packaging/cache/ffprobe
-          chmod +x packaging/cache/ffmpeg packaging/cache/ffprobe
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare checksum-verified FFmpeg (linux64)
+        run: python packaging/ffmpeg.py linux-x86_64
 
       - name: Build release
         run: cargo build --release --locked
@@ -143,9 +125,10 @@ jobs:
           STAGE="packaging/stage/${NAME}"
           mkdir -p "$STAGE" dist
           cp target/release/quaternio "$STAGE/quaternio"
-          cp packaging/cache/ffmpeg "$STAGE/ffmpeg"
-          cp packaging/cache/ffprobe "$STAGE/ffprobe"
+          cp packaging/cache/prepared/ffmpeg "$STAGE/ffmpeg"
+          cp packaging/cache/prepared/ffprobe "$STAGE/ffprobe"
           cp LICENSE "$STAGE/LICENSE"
+          cp -R packaging/cache/prepared/FFmpeg-notices "$STAGE/FFmpeg-notices"
           chmod +x "$STAGE/quaternio" "$STAGE/ffmpeg" "$STAGE/ffprobe"
           tar -czf "dist/${NAME}.tar.gz" -C packaging/stage "$NAME"
 
@@ -162,7 +145,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14]
+        include:
+          - os: macos-14
+            arch: arm64
+          - os: macos-15-intel
+            arch: x86_64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -170,23 +157,12 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Download pinned FFmpeg (macOS)
-        run: |
-          ARCH="$(uname -m)"
-          mkdir -p packaging/cache
-          test "$ARCH" = "arm64"
-          curl -L --fail --retry 3 -o packaging/cache/ffmpeg.zip "$FFMPEG_MAC_ARM_FFMPEG_URL"
-          curl -L --fail --retry 3 -o packaging/cache/ffprobe.zip "$FFMPEG_MAC_ARM_FFPROBE_URL"
-          unzip -o packaging/cache/ffmpeg.zip -d packaging/cache/ffmpeg-extract
-          unzip -o packaging/cache/ffprobe.zip -d packaging/cache/ffprobe-extract
-          FFMPEG_BIN=$(find packaging/cache/ffmpeg-extract -type f -name ffmpeg | head -n1)
-          FFPROBE_BIN=$(find packaging/cache/ffprobe-extract -type f -name ffprobe | head -n1)
-          test -n "$FFMPEG_BIN" && test -n "$FFPROBE_BIN"
-          cp "$FFMPEG_BIN" packaging/cache/ffmpeg
-          cp "$FFPROBE_BIN" packaging/cache/ffprobe
-          chmod +x packaging/cache/ffmpeg packaging/cache/ffprobe
-          # Ad-hoc sign so Gatekeeper is less hostile for unsigned beta sidecars
-          codesign -s - packaging/cache/ffmpeg packaging/cache/ffprobe || true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare checksum-verified FFmpeg (macOS)
+        run: python packaging/ffmpeg.py macos-${{ matrix.arch }}
 
       - name: Build release
         run: cargo build --release --locked
@@ -199,9 +175,10 @@ jobs:
           STAGE="packaging/stage/${NAME}"
           mkdir -p "$STAGE" dist
           cp target/release/quaternio "$STAGE/quaternio"
-          cp packaging/cache/ffmpeg "$STAGE/ffmpeg"
-          cp packaging/cache/ffprobe "$STAGE/ffprobe"
+          cp packaging/cache/prepared/ffmpeg "$STAGE/ffmpeg"
+          cp packaging/cache/prepared/ffprobe "$STAGE/ffprobe"
           cp LICENSE "$STAGE/LICENSE"
+          cp -R packaging/cache/prepared/FFmpeg-notices "$STAGE/FFmpeg-notices"
           chmod +x "$STAGE/quaternio" "$STAGE/ffmpeg" "$STAGE/ffprobe"
           codesign -s - "$STAGE/quaternio" || true
           tar -czf "dist/${NAME}.tar.gz" -C packaging/stage "$NAME"
@@ -236,9 +213,9 @@ jobs:
           ls -la release/
           COUNT="$(find release -type f | wc -l | tr -d ' ')"
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
-          # Expect: Win zip + Setup + Linux tar + macOS arm64 = 4
-          if [ "$COUNT" -lt 4 ]; then
-            echo "Expected at least 4 release files, found ${COUNT}" >&2
+          # Expect: Win zip + Setup + Linux tar + both macOS architectures = 5
+          if [ "$COUNT" -ne 5 ]; then
+            echo "Expected 5 release files, found ${COUNT}" >&2
             exit 1
           fi
 

@@ -16,6 +16,14 @@ const MAX_DEPTH: usize = 32;
 pub const BATCH_SIZE: usize = 32;
 pub const REFRESH_INTERVAL: Duration = Duration::from_millis(150);
 
+pub fn failure_report(imported: usize, errors: usize, cancelled: bool, error: &str) -> Option<String> {
+    if errors == 0 || cancelled { return None; }
+    Some(format!(
+        "Files imported: {imported}\nErrors: {errors}\n\nFiles imported successfully remain in the project.\n\nMost recent error:\n{}",
+        error.chars().take(2048).collect::<String>(),
+    ))
+}
+
 /// Filesystem presence checks must never run inside bin row construction.
 /// A single bounded worker refreshes the UI-owned cache, including loaded/offline
 /// projects. Successful imports seed it immediately; unknown paths are optimistic.
@@ -188,6 +196,17 @@ pub fn start(paths: Vec<PathBuf>, existing: Vec<PathBuf>, bin: String) -> (Job, 
     let job = Job { cancel: cancel.clone(), progress: progress.clone(), paths: active.clone() };
     let (tx, rx) = mpsc::sync_channel(64);
     std::thread::spawn(move || {
+        if let Err(error) = crate::playback::find_ffprobe() {
+            progress.scanning.store(false, Ordering::Release);
+            let names = if cfg!(windows) { "ffmpeg.exe and ffprobe.exe" } else { "ffmpeg and ffprobe" };
+            let directory = std::env::current_exe().ok()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .map(|path| path.display().to_string()).unwrap_or_else(|| "the application folder".into());
+            let detail = format!("{error}\n\nKeep {names} beside Quaternio in:\n{directory}\n\nFor a source build, install FFmpeg on PATH or copy both tools into that folder. Then retry the import.");
+            let _ = send(&tx, ImportEvent::DiscoveryError(detail), &cancel);
+            let _ = tx.send(ImportEvent::Done);
+            return;
+        }
         let (work_tx, work_rx) = mpsc::sync_channel::<PathBuf>(32);
         let work_rx = Mutex::new(work_rx);
         let workers = std::thread::available_parallelism().map(|n| n.get() / 2).unwrap_or(2).clamp(1, 4);
@@ -205,7 +224,7 @@ pub fn start(paths: Vec<PathBuf>, existing: Vec<PathBuf>, bin: String) -> (Job, 
                             media.bin = bin.clone();
                             ImportEvent::Media(media)
                         }
-                        Err(error) => ImportEvent::Error(error),
+                        Err(error) => ImportEvent::Error(format!("{}: {error}", path.display())),
                     };
                     if !send(tx, event, cancel) { break; }
                 });

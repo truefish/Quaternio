@@ -23,6 +23,7 @@ struct SelectionKey {
     rate: (u32, u32),
     quality: u8,
     candidates: Vec<VideoEncoder>,
+    runtime: Vec<Option<std::ffi::OsString>>,
 }
 static ENCODERS: OnceLock<Mutex<HashMap<SelectionKey, Selection>>> = OnceLock::new();
 
@@ -35,7 +36,29 @@ fn selection_key(ffmpeg: &Path, settings: &ExportSettings, candidates: Vec<Video
         rate: (settings.frame_rate.num, settings.frame_rate.den),
         quality: settings.crf.clamp(1, 40),
         candidates,
+        runtime: runtime_identity(),
     })
+}
+
+fn runtime_identity() -> Vec<Option<std::ffi::OsString>> {
+    let mut identity: Vec<_> = ["CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "NVIDIA_VISIBLE_DEVICES",
+        "LIBVA_DRIVER_NAME", "LIBVA_DRIVERS_PATH", "LD_LIBRARY_PATH", "PATH",
+        "QUATERNIO_VAAPI_DEVICE"].iter().map(std::env::var_os).collect();
+    #[cfg(windows)]
+    if let Some(system) = std::env::var_os("SystemRoot") {
+        let system = PathBuf::from(system).join("System32");
+        for name in ["nvEncodeAPI64.dll", "nvcuda.dll", "amfrt64.dll", "libmfxhw64.dll", "libvpl.dll"] {
+            identity.push(fingerprint(&system.join(name)).map(|f| format!("{f:?}").into()));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    for path in ["/proc/driver/nvidia/version", "/sys/module/i915/version", "/sys/module/xe/version", "/sys/module/amdgpu/version"] {
+        use std::io::Read;
+        let mut text = String::new();
+        identity.push(File::open(path).ok().and_then(|file|
+            file.take(4096).read_to_string(&mut text).ok().map(|_| text.into())));
+    }
+    identity
 }
 
 fn candidates() -> (Vec<VideoEncoder>, String) {
@@ -248,6 +271,9 @@ pub(super) fn preferred(
         }
         selection
     };
+    if !selection.reason.is_empty() {
+        diagnostics::record(|d| d.fallback_reasons.push(selection.reason.clone()));
+    }
     if selection.encoder == VideoEncoder::Cpu {
         if matches!(settings.encoder, EncoderPreference::Hardware) {
             return Err(format!(
@@ -284,96 +310,164 @@ pub(super) fn encoder_failed(ffmpeg: &Path, settings: &ExportSettings, reason: &
     }
 }
 
-pub(super) fn resident_filter(plan: &DirectExport, settings: &ExportSettings) -> String {
-    format!("[0:V:0]trim=start_frame={}:end_frame={},setpts=N/(({}/{})*TB),scale_cuda={}:{}:format=nv12:interp_algo=bilinear[v]",plan.first_frame,plan.first_frame+plan.frame_count,settings.frame_rate.num,settings.frame_rate.den,plan.fitted_width,plan.fitted_height)
+// Native hardware frame filters are mandatory: never insert hwupload/hwdownload
+// to make a "resident" probe succeed. This establishes the FFmpeg frame route,
+// not a guarantee about copies inside a driver. VAAPI options are documented in
+// https://ffmpeg.org/doxygen/8.1/vf__scale__vaapi_8c.html.
+// Experimental backends must pass the complete decode/filter/encode probe.
+// AMF resident scaling remains unavailable; its software-frame encoder works.
+fn resident_scale(encoder: &VideoEncoder, width: u32, height: u32) -> Option<String> {
+    match encoder {
+        VideoEncoder::Nvenc => Some(format!("scale_cuda={width}:{height}:format=nv12:interp_algo=bilinear")),
+        VideoEncoder::Vaapi(_) => Some(format!("scale_vaapi=w={width}:h={height}:format=nv12")),
+        VideoEncoder::Qsv => Some(format!("scale_qsv=w={width}:h={height}:format=nv12")),
+        VideoEncoder::VideoToolbox => Some(format!("scale_vt=w={width}:h={height}")),
+        _ => None,
+    }
 }
-pub(super) fn resident_eligible(
-    plan: &DirectExport,
-    settings: &ExportSettings,
-    encoder: &VideoEncoder,
-) -> bool {
-    *encoder == VideoEncoder::Nvenc
+
+/// Owns device setup AND the first input. Call instead of configure_device/-i
+/// for a resident attempt, so probing and actual export use the same device.
+pub(super) fn configure_resident_input(command: &mut Command, encoder: &VideoEncoder, plan: &DirectExport) {
+    match encoder {
+        VideoEncoder::Nvenc => { command.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]); }
+        VideoEncoder::Vaapi(device) => {
+            command.args(["-hwaccel", "vaapi", "-hwaccel_device"]).arg(device)
+                .args(["-hwaccel_output_format", "vaapi"]);
+        }
+        VideoEncoder::Qsv => {
+            command.args(["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]);
+        }
+        VideoEncoder::VideoToolbox => {
+            command.args(["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"]);
+        }
+        _ => unreachable!("resident input requires an eligible backend"),
+    }
+    command.arg("-i").arg(&plan.path);
+}
+
+pub(super) fn resident_filter(plan: &DirectExport, settings: &ExportSettings, encoder: &VideoEncoder) -> String {
+    let scale = if plan.source_width == plan.fitted_width && plan.source_height == plan.fitted_height {
+        "null".into()
+    } else {
+        resident_scale(encoder, plan.fitted_width, plan.fitted_height)
+            .expect("resident filter requires an eligible backend")
+    };
+    let end = plan.first_frame.checked_add(plan.frame_count).expect("validated resident frame range");
+    format!("[0:V:0]trim=start_frame={}:end_frame={end},settb=expr={}/{},setpts=N,{scale}[v]",
+        plan.first_frame, settings.frame_rate.den, settings.frame_rate.num)
+}
+
+fn enabled(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| value == "1")
+}
+
+pub(super) fn resident_eligible(plan: &DirectExport, settings: &ExportSettings, encoder: &VideoEncoder) -> bool {
+    !enabled("QUATERNIO_DISABLE_GPU_RESIDENT")
+        && (*encoder == VideoEncoder::Nvenc
+            || (enabled("QUATERNIO_EXPERIMENTAL_GPU")
+                && ((cfg!(target_os = "linux") && matches!(encoder, VideoEncoder::Vaapi(_)))
+                    || ((cfg!(windows) || cfg!(target_os = "linux")) && *encoder == VideoEncoder::Qsv)
+                    || (cfg!(target_os = "macos") && *encoder == VideoEncoder::VideoToolbox))))
         && plan.gpu_safe
+        && plan.first_frame >= 0 && plan.frame_count > 0
+        && plan.first_frame.checked_add(plan.frame_count).is_some()
+        && settings.frame_rate.num > 0 && settings.frame_rate.den > 0
         && plan.fitted_width == (settings.width.max(16) & !1)
         && plan.fitted_height == (settings.height.max(16) & !1)
 }
-type ResidentKey = (Fingerprint, Fingerprint, u32, u32, RenderSpeed);
-static RESIDENT: OnceLock<Mutex<HashMap<ResidentKey, (bool, Instant)>>> = OnceLock::new();
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ResidentKey {
+    executable: Fingerprint,
+    source: Fingerprint,
+    width: u32,
+    height: u32,
+    source_size: (u32, u32),
+    first_frame: i64,
+    frame_count: i64,
+    speed: RenderSpeed,
+    rate: (u32, u32),
+    quality: u8,
+    encoder: VideoEncoder,
+    device: Option<Fingerprint>,
+    // Environment identity is cheap and bounded; no driver discovery subprocess.
+    // Driver replacement not reflected here is covered by the short cache TTL.
+    runtime: Vec<Option<std::ffi::OsString>>,
+}
+fn resident_key(ffmpeg: &Path, plan: &DirectExport, settings: &ExportSettings, encoder: &VideoEncoder) -> Option<ResidentKey> {
+    Some(ResidentKey {
+        executable: fingerprint(ffmpeg)?, source: fingerprint(&plan.path)?,
+        width: plan.fitted_width, height: plan.fitted_height,
+        source_size: (plan.source_width, plan.source_height),
+        first_frame: plan.first_frame, frame_count: plan.frame_count,
+        speed: settings.speed, rate: (settings.frame_rate.num, settings.frame_rate.den),
+        quality: settings.crf.clamp(1, 40), encoder: encoder.clone(),
+        device: match encoder { VideoEncoder::Vaapi(path) => fingerprint(path), _ => None },
+        runtime: runtime_identity(),
+    })
+}
+#[derive(Clone)]
+struct ResidentResult { failure: Option<String>, at: Instant }
+static RESIDENT: OnceLock<Mutex<HashMap<ResidentKey, ResidentResult>>> = OnceLock::new();
+fn cache_resident(key: ResidentKey, failure: Option<String>) {
+    let mut cache = RESIDENT.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= 32 { cache.clear(); }
+    cache.insert(key, ResidentResult { failure, at: Instant::now() });
+}
+fn record_resident_failure(reason: &str) {
+    diagnostics::record(|d| d.fallback_reasons.push(format!("GPU resident route: {reason}")));
+}
 pub(super) fn resident_available(
-    ffmpeg: &Path,
-    plan: &DirectExport,
-    settings: &ExportSettings,
-    encoder: &VideoEncoder,
-    cancel: &AtomicBool,
-    progress: &Sender<ExportProgress>,
+    ffmpeg: &Path, plan: &DirectExport, settings: &ExportSettings,
+    encoder: &VideoEncoder, cancel: &AtomicBool, progress: &Sender<ExportProgress>,
 ) -> Result<bool, String> {
+    if cancel.load(Ordering::Acquire) { return Err("Export cancelled".into()); }
     if !resident_eligible(plan, settings, encoder) {
+        if enabled("QUATERNIO_DISABLE_GPU_RESIDENT") {
+            record_resident_failure("disabled by QUATERNIO_DISABLE_GPU_RESIDENT=1");
+        }
         return Ok(false);
     }
-    let key = fingerprint(ffmpeg)
-        .zip(fingerprint(&plan.path))
-        .map(|(ff, source)| {
-            (
-                ff,
-                source,
-                plan.fitted_width,
-                plan.fitted_height,
-                settings.speed,
-            )
-        });
-    if let Some(result) = key
-        .as_ref()
-        .and_then(|key| {
-            RESIDENT
-                .get_or_init(Default::default)
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(key)
-                .copied()
-        })
-        .filter(|(_, at)| at.elapsed() < Duration::from_secs(60))
-    {
-        return Ok(result.0);
+    let key = resident_key(ffmpeg, plan, settings, encoder);
+    let cached = key.as_ref().and_then(|key| RESIDENT.get_or_init(Default::default)
+        .lock().unwrap_or_else(|e| e.into_inner()).get(key).cloned())
+        .filter(|entry| entry.at.elapsed() < Duration::from_secs(60));
+    if let Some(entry) = cached {
+        if let Some(reason) = &entry.failure { record_resident_failure(reason); }
+        return Ok(entry.failure.is_none());
     }
-    send_progress(
-        progress,
-        0.0,
-        "Checking GPU decode, resize and encode path".into(),
-    );
+    send_progress(progress, 0.0, "Checking GPU decode, resize and encode path".into());
     let mut command = ffmpeg_command(ffmpeg);
-    command.args(["-hwaccel","cuda","-hwaccel_output_format","cuda","-i"]).arg(&plan.path)
-        .args(["-map","0:V:0","-an","-vf"]).arg(format!("trim=start_frame=0:end_frame=6,setpts=PTS-STARTPTS,scale_cuda={}:{}:format=nv12:interp_algo=bilinear",plan.fitted_width,plan.fitted_height))
-        .args(["-frames:v","6"]);
+    configure_resident_input(&mut command, encoder, plan);
+    command.args(["-an", "-filter_complex"]).arg(resident_filter(plan, settings, encoder))
+        .args(["-map", "[v]", "-frames:v"]).arg(plan.frame_count.min(6).to_string())
+        .arg("-enc_time_base:v").arg(format!("{}/{}", settings.frame_rate.den, settings.frame_rate.num))
+        .args(["-fps_mode", "passthrough"]);
     encoder.configure(&mut command, settings);
     command.args(["-f", "h264", "pipe:1"]);
-    let available = probe(command, cancel, Duration::from_secs(8))?.is_ok();
-    if let Some(key) = key {
-        let mut cache = RESIDENT
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if cache.len() >= 32 {
-            cache.clear();
-        }
-        cache.insert(key, (available, Instant::now()));
-    }
+    // Long source trims may time out. Conservatively use the ordinary route;
+    // never replace frame-accurate trimming with an approximate input seek.
+    let result = diagnostics::measure(diagnostics::ExportStage::RouteProbe,
+        || probe(command, cancel, Duration::from_secs(8)))?;
+    let failure = result.err().map(|reason| reason.chars().take(1600).collect::<String>());
+    if let Some(reason) = &failure { record_resident_failure(reason); }
+    let available = failure.is_none();
+    if let Some(key) = key { cache_resident(key, failure); }
     Ok(available)
 }
+
+// Preserve the parent API: invalidate every backend for this source/settings,
+// retaining the precise encoder/runtime keys instead of guessing the encoder.
 pub(super) fn resident_failed(ffmpeg: &Path, plan: &DirectExport, settings: &ExportSettings) {
-    if let Some((ff, source)) = fingerprint(ffmpeg).zip(fingerprint(&plan.path)) {
-        RESIDENT
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                (
-                    ff,
-                    source,
-                    plan.fitted_width,
-                    plan.fitted_height,
-                    settings.speed,
-                ),
-                (false, Instant::now()),
-            );
+    let Some((ff, source)) = fingerprint(ffmpeg).zip(fingerprint(&plan.path)) else { return; };
+    let mut cache = RESIDENT.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    for (key, entry) in cache.iter_mut() {
+        if key.executable == ff && key.source == source
+            && key.width == plan.fitted_width && key.height == plan.fitted_height
+            && key.rate == (settings.frame_rate.num, settings.frame_rate.den)
+            && key.quality == settings.crf.clamp(1, 40) && key.speed == settings.speed {
+            *entry = ResidentResult { failure: Some("previous resident export failed".into()), at: Instant::now() };
+        }
     }
 }

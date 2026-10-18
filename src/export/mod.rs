@@ -18,6 +18,10 @@ use crate::transitions::transition_window;
 mod gpu;
 mod audio;
 mod progress;
+pub mod diagnostics;
+pub mod worker;
+mod timeline;
+use diagnostics::{ExportDiagnostics, ExportRoute, ExportStage};
 pub use progress::format_remaining_time;
 
 struct TemporaryAudioFile {
@@ -143,21 +147,21 @@ fn export_audio_media(project: &Project, start: i64, end: i64) -> HashSet<u64> {
     used
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum EncoderPreference {
     Auto,
     Cpu,
     /// Require hardware encoding; picture composition may still use the CPU.
     Hardware }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RenderSpeed {
     #[default]
     Balanced,
     Fast,
     Compact }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExportSettings {
     pub width: u32,
     pub height: u32,
@@ -421,6 +425,8 @@ enum DirectAudioRoute {
 
 struct DirectExport {
     path: PathBuf,
+    source_width: u32,
+    source_height: u32,
     timeline_start: i64,
     first_frame: i64,
     frame_count: i64,
@@ -613,6 +619,8 @@ fn direct_export_plan(project: &Project, settings: &ExportSettings) -> Option<Di
     let audio = direct_audio_route(project, video, start, end);
     Some(DirectExport {
         path: media.path.clone(),
+        source_width: media.width,
+        source_height: media.height,
         timeline_start: start,
         first_frame,
         frame_count,
@@ -744,7 +752,35 @@ fn source_matches_rate(
     path: &Path,
     ffmpeg: &Path,
     rate: FrameRate,
+    expected_size: (u32, u32),
     cancel: &AtomicBool,
+) -> Result<(bool, bool), String> {
+    type MetadataKey = (PathBuf, u64, SystemTime, PathBuf, u64, SystemTime, u32, u32, (u32, u32));
+    type MetadataCache = std::collections::HashMap<MetadataKey, ((bool, bool), Instant)>;
+    static CACHE: OnceLock<Mutex<MetadataCache>> = OnceLock::new();
+    if cancel.load(Ordering::Acquire) { return Err("Export cancelled".into()); }
+    let probe = ffmpeg.with_file_name(if cfg!(windows) { "ffprobe.exe" } else { "ffprobe" });
+    let key = std::fs::metadata(path).ok().zip(std::fs::metadata(&probe).ok())
+        .and_then(|(source, executable)| Some((
+            std::fs::canonicalize(path).ok()?, source.len(), source.modified().ok()?,
+            probe, executable.len(), executable.modified().ok()?, rate.num, rate.den, expected_size,
+        )));
+    if let Some(result) = key.as_ref().and_then(|key| CACHE.get_or_init(Default::default)
+        .lock().unwrap_or_else(|e| e.into_inner()).get(key).copied())
+        .filter(|(_, at)| at.elapsed() < Duration::from_secs(60)) {
+        return Ok(result.0);
+    }
+    let result = source_matches_rate_uncached(path, ffmpeg, rate, expected_size, cancel)?;
+    if let Some(key) = key {
+        let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= 128 { cache.clear(); }
+        cache.insert(key, (result, Instant::now()));
+    }
+    Ok(result)
+}
+
+fn source_matches_rate_uncached(
+    path: &Path, ffmpeg: &Path, rate: FrameRate, expected_size: (u32, u32), cancel: &AtomicBool,
 ) -> Result<(bool, bool), String> {
     let ffprobe = ffmpeg.with_file_name(if cfg!(windows) {
         "ffprobe.exe"
@@ -761,7 +797,7 @@ fn source_matches_rate(
             "-select_streams",
             "V:0",
             "-show_entries",
-            "stream=avg_frame_rate,r_frame_rate,nb_frames,duration,codec_name,pix_fmt,color_range,color_space,color_transfer,color_primaries,sample_aspect_ratio:stream_side_data=rotation:stream_tags=rotate",
+            "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration,codec_name,pix_fmt,color_range,color_space,color_transfer,color_primaries,sample_aspect_ratio:stream_side_data=rotation:stream_tags=rotate",
             "-of",
             "json",
         ])
@@ -822,7 +858,9 @@ fn source_matches_rate(
     let duration = stream["duration"]
         .as_str()
         .and_then(|value| value.parse::<f64>().ok());
-    let gpu_safe = gpu::safe_source_metadata(stream);
+    let gpu_safe = gpu::safe_source_metadata(stream)
+        && stream["width"].as_u64() == Some(expected_size.0 as u64)
+        && stream["height"].as_u64() == Some(expected_size.1 as u64);
     Ok((
         matches(&stream["r_frame_rate"])
             && matches(&stream["avg_frame_rate"])
@@ -842,6 +880,7 @@ fn thread_progress(
     label: String,
     advancing_frames: Option<Arc<AtomicU64>>,
 ) -> std::thread::JoinHandle<()> {
+    let collector = diagnostics::worker_collector();
     std::thread::spawn(move || {
         let Some(stdout) = stdout else { return };
         let started = Instant::now();
@@ -853,6 +892,9 @@ fn thread_progress(
             {
                 if let Some(frames) = &advancing_frames {
                     frames.store(frame.max(0) as u64, Ordering::Relaxed);
+                }
+                if let Some(collector) = &collector {
+                    collector.observe_frame(frame.max(0) as u64);
                 }
                 let _ = progress.send(ExportProgress {
                     preparation: None,
@@ -876,9 +918,14 @@ fn export_direct(
     cancel: &AtomicBool,
     progress: Sender<ExportProgress>,
 ) -> Result<(), String> {
+    diagnostics::record(|d| {
+        d.route = Some(ExportRoute::Direct);
+        d.picture_route = Some(if gpu_resident { "gpu_resident" } else { "software_frames" }.into());
+        d.audio_route = Some(match plan.audio { DirectAudioRoute::Mixed => "mixed", DirectAudioRoute::Silence => "silence", DirectAudioRoute::Source(_) => "source" }.into());
+    });
     let width = settings.width.max(16) & !1;
     let height = settings.height.max(16) & !1;
-    let rate = format!("{}/{}", settings.frame_rate.num, settings.frame_rate.den);
+    let time_base = format!("{}/{}", settings.frame_rate.den, settings.frame_rate.num);
     let duration = settings.frame_rate.frame_to_seconds(plan.frame_count);
     let last_frame = plan
         .first_frame
@@ -886,16 +933,17 @@ fn export_direct(
         .ok_or("Export exceeds the source frame range")?;
     let mut command = ffmpeg_command(ffmpeg);
     command.args(["-y", "-threads", "2"]);
-    encoder.configure_device(&mut command);
     if gpu_resident {
-        command.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
+        gpu::configure_resident_input(&mut command, encoder, plan);
+    } else {
+        encoder.configure_device(&mut command);
+        command.arg("-i").arg(&plan.path);
     }
-    command.arg("-i").arg(&plan.path);
     let video_filter = if gpu_resident {
-        gpu::resident_filter(plan, settings)
+        gpu::resident_filter(plan, settings, encoder)
     } else {
         format!(
-        "[0:V:0]trim=start_frame={}:end_frame={last_frame},setpts=N/(({rate})*TB),scale={}:{}:flags=bilinear,format=rgb24,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,{}[v]",
+        "[0:V:0]trim=start_frame={}:end_frame={last_frame},settb=expr={time_base},setpts=N,scale={}:{}:flags=bilinear,format=rgb24,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,{}[v]",
         plan.first_frame, plan.fitted_width, plan.fitted_height, encoder.software_frame_filter(),
     )
     };
@@ -925,7 +973,8 @@ fn export_direct(
     command
         .args(["-filter_complex_threads", "2", "-filter_complex"])
         .arg(format!("{video_filter};{audio_filter}"))
-        .args(["-map", "[v]", "-map", "[a]", "-r", &rate, "-frames:v"])
+        .args(["-map", "[v]", "-map", "[a]", "-enc_time_base:v", &time_base,
+            "-fps_mode", "passthrough", "-frames:v"])
         .arg(plan.frame_count.to_string());
     encoder.configure(&mut command, settings);
     if !gpu_resident {
@@ -1055,23 +1104,23 @@ impl OutputFramePolicy {
 #[derive(Default)]
 struct LastCompositeFrame {
     frame: Option<i64>,
-    image: Option<ImageBuf> }
+    image: Option<Arc<ImageBuf>> }
 
 impl LastCompositeFrame {
     fn get_or_render(
         &mut self,
         frame: i64,
         render: impl FnOnce() -> Result<ImageBuf, String>,
-    ) -> Result<&ImageBuf, String> {
+    ) -> Result<Arc<ImageBuf>, String> {
         if self.frame != Some(frame) {
             let image = render()?;
-            self.image = Some(image);
+            self.image = Some(Arc::new(image));
             self.frame = Some(frame);
         }
-        Ok(self
+        Ok(Arc::clone(self
             .image
             .as_ref()
-            .expect("a cached frame has a successful image"))
+            .expect("a cached frame has a successful image")))
     }
 }
 
@@ -1081,10 +1130,43 @@ pub fn export_mp4(
     cancel: &AtomicBool,
     progress: Sender<ExportProgress>,
 ) -> Result<(), String> {
+    if std::env::var("QUATERNIO_EXPORT_WORKER").as_deref() == Ok("1")
+        && !worker::is_worker_process()
+    {
+        return worker::run(project, settings, cancel, progress);
+    }
     final_export_result(
         export_mp4_inner(project, settings, cancel, progress),
         cancel,
     )
+}
+
+pub fn export_mp4_with_diagnostics(
+    project: &Project,
+    settings: &ExportSettings,
+    cancel: &AtomicBool,
+    progress: Sender<ExportProgress>,
+    diagnostics: &mut ExportDiagnostics,
+) -> Result<(), String> {
+    diagnostics::collect(diagnostics, || export_mp4(project, settings, cancel, progress))
+}
+
+fn record_encoder(encoder: &VideoEncoder) {
+    diagnostics::record(|d| {
+        d.backend = Some(match encoder {
+            VideoEncoder::Cpu => "libx264",
+            VideoEncoder::Nvenc => "h264_nvenc",
+            VideoEncoder::Qsv => "h264_qsv",
+            VideoEncoder::Amf => "h264_amf",
+            VideoEncoder::VideoToolbox => "h264_videotoolbox",
+            VideoEncoder::Vaapi(_) => "h264_vaapi",
+        }.into());
+        d.device = match encoder {
+            VideoEncoder::Vaapi(path) => Some(path.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        d.frames_encoded = None;
+    });
 }
 
 fn export_mp4_inner(
@@ -1101,29 +1183,62 @@ fn export_mp4_inner(
     if !settings.frame_rate.fps().is_finite() || settings.frame_rate.fps() <= 0.0 {
         return Err("Frame rate is invalid".into());
     }
-    preflight_media(project, settings)?;
+    diagnostics::measure(ExportStage::Preflight, || preflight_media(project, settings))?;
     let ffmpeg = export_ffmpeg()?;
-    let encoder = gpu::preferred(&ffmpeg, settings, cancel, &progress)?;
-    let direct = if let Some(mut plan) = direct_export_plan(project, settings) {
-        send_progress(
-            &progress,
-            0.0,
-            "Checking direct export compatibility".into(),
-        );
-        let (matches, gpu_safe) =
-            source_matches_rate(&plan.path, &ffmpeg, settings.frame_rate, cancel)?;
-        plan.gpu_safe = gpu_safe;
-        matches.then_some(plan)
-    } else {
-        None
-    };
+    // Device probing and source inspection are independent subprocesses.
+    let (encoder, direct, timeline) = std::thread::scope(|scope| -> Result<_, String> {
+        let collector = diagnostics::worker_collector();
+        let ffmpeg_ref = &ffmpeg;
+        let progress_ref = &progress;
+        let probe = scope.spawn(move || diagnostics::with_collector(collector, || {
+            diagnostics::measure(ExportStage::EncoderProbe, ||
+                gpu::preferred(ffmpeg_ref, settings, cancel, progress_ref))
+        }));
+        let plans = (|| -> Result<_, String> {
+            let direct = if let Some(mut plan) = direct_export_plan(project, settings) {
+                send_progress(
+                    &progress,
+                    0.0,
+                    "Checking direct export compatibility".into(),
+                );
+                let (matches, gpu_safe) =
+                    diagnostics::measure(ExportStage::RouteProbe, || source_matches_rate(&plan.path, &ffmpeg, settings.frame_rate,
+                        (plan.source_width, plan.source_height), cancel))?;
+                plan.gpu_safe = gpu_safe;
+                matches.then_some(plan)
+            } else {
+                None
+            };
+            let timeline = if direct.is_none()
+                && std::env::var("QUATERNIO_EXPERIMENTAL_TIMELINE").as_deref() == Ok("1")
+            {
+                match timeline::plan(project, settings) {
+                    Some(plan) if diagnostics::measure(ExportStage::RouteProbe, || timeline::validate(&ffmpeg, &plan, cancel))? => Some(plan),
+                    _ => None,
+                }
+            } else { None };
+            Ok((direct, timeline))
+        })();
+        // Reap the probe even when source validation failed or was cancelled.
+        let encoder = probe.join().map_err(|_| "Encoder probe worker failed".to_string())?;
+        let (mut direct, mut timeline) = plans?;
+        if direct.is_none()
+            && std::env::var("QUATERNIO_EXPERIMENTAL_GPU").as_deref() == Ok("1") {
+            // Continuous razor cuts can reuse the existing native picture path.
+            // Keep long trims on the timeline route's bounded seek implementation.
+            direct = timeline.as_ref().and_then(timeline::as_direct)
+                .filter(|plan| plan.first_frame == 0);
+            if direct.is_some() { timeline = None; }
+        }
+        Ok((encoder?, direct, timeline))
+    })?;
     if cancel.load(Ordering::Relaxed) {
         return Err("Export cancelled".into());
     }
     let staged = StagedOutput::create(&settings.output)?;
     let mut working_settings = settings.clone();
     working_settings.output = staged.path.clone();
-    let mixed_audio = if let Some(plan) = &direct {
+    let mixed_audio = diagnostics::measure(ExportStage::AudioPreparation, || -> Result<_, String> { Ok(if let Some(plan) = &direct {
         if matches!(plan.audio, DirectAudioRoute::Mixed) {
             Some(prepare_mixed_audio(
                 project,
@@ -1141,8 +1256,10 @@ fn export_mp4_inner(
         // export_composited pads the encoded tail with silence as needed.
         let (start, end) = export_sequence_range(project, settings)?;
         Some(prepare_mixed_audio(project, start, end, cancel, &progress)?)
-    };
+    }) })?;
+    let timeline_failed = std::cell::Cell::new(false);
     let render = |encoder: &VideoEncoder| {
+        record_encoder(encoder);
         if let Some(plan) = &direct {
             let try_hwaccel = gpu::resident_available(
                 &ffmpeg,
@@ -1165,6 +1282,8 @@ fn export_mp4_inner(
                 Ok(()) => Ok(()),
                 Err(error) if cancel.load(Ordering::Acquire) => Err(error),
                 Err(error) if try_hwaccel => {
+                    diagnostics::record(|d| d.fallback_reasons.push(error.clone()));
+                    record_encoder(encoder);
                     gpu::resident_failed(&ffmpeg, plan, &working_settings);
                     let detail: String = error.chars().take(180).collect();
                     send_progress(
@@ -1184,6 +1303,26 @@ fn export_mp4_inner(
                     )
                 }
                 Err(error) => Err(error) }
+        } else if let Some(plan) = &timeline {
+            let audio = mixed_audio.as_ref().ok_or("The mixed audio stream was not prepared")?;
+            if !timeline_failed.get() {
+                diagnostics::record(|d| {
+                    d.route = Some(ExportRoute::Timeline);
+                    d.picture_route = Some("cpu_decode_filtergraph".into());
+                    d.audio_route = Some("mixed".into());
+                });
+                match timeline::render(&ffmpeg, plan, &working_settings, encoder, audio, cancel, progress.clone()) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if cancel.load(Ordering::Acquire) => return Err(error),
+                    Err(error) => {
+                        timeline_failed.set(true);
+                        diagnostics::record(|d| d.fallback_reasons.push(format!("Timeline picture path: {error}")));
+                        send_progress(&progress, 0.0, "Timeline picture path failed; retrying compositor".into());
+                        record_encoder(encoder);
+                    }
+                }
+            }
+            export_composited(project, &working_settings, encoder, audio, cancel, progress.clone())
         } else {
             send_progress(&progress, 0.0, format!("Compositor · {}", encoder.label()));
             export_composited(
@@ -1199,7 +1338,8 @@ fn export_mp4_inner(
         }
     };
     let mut completed_encoder = encoder.clone();
-    if let Err(error) = render(&encoder) {
+    if let Err(error) = diagnostics::measure(ExportStage::Encode, || render(&encoder)) {
+        diagnostics::record(|d| d.fallback_reasons.push(error.clone()));
         if cancel.load(Ordering::Acquire) {
             return Err("Export cancelled".into());
         }
@@ -1219,7 +1359,7 @@ fn export_mp4_inner(
             0.0,
             format!("{} failed; retrying CPU · {detail}", encoder.label()),
         );
-        render(&VideoEncoder::Cpu).map_err(|fallback| {
+        diagnostics::measure(ExportStage::Encode, || render(&VideoEncoder::Cpu)).map_err(|fallback| {
             format!("Hardware encoding failed: {detail}. CPU fallback: {fallback}")
         })?;
         completed_encoder = VideoEncoder::Cpu;
@@ -1228,7 +1368,7 @@ fn export_mp4_inner(
         return Err("Export cancelled".into());
     }
     send_progress(&progress, 0.995, "Finalizing output".into());
-    staged.commit(&settings.output, cancel)?;
+    diagnostics::measure(ExportStage::Finalization, || staged.commit(&settings.output, cancel))?;
     let _ = progress.send(ExportProgress {
         preparation: None,
         fraction: 1.0,
@@ -1247,6 +1387,11 @@ fn export_composited(
     cancel: &AtomicBool,
     progress: Sender<ExportProgress>,
 ) -> Result<(), String> {
+    diagnostics::record(|d| {
+        d.route = Some(ExportRoute::Composite);
+        d.picture_route = Some("cpu_composite_bounded_pipe".into());
+        d.audio_route = Some("mixed".into());
+    });
     if cancel.load(Ordering::Relaxed) {
         return Err("Export cancelled".into());
     }
@@ -1352,6 +1497,7 @@ fn export_composited(
     );
     let child = Mutex::new(child);
     let monitor_done = AtomicBool::new(false);
+    let stalled = AtomicBool::new(false);
     struct MonitorFinished<'a>(&'a AtomicBool);
     impl Drop for MonitorFinished<'_> {
         fn drop(&mut self) {
@@ -1362,8 +1508,17 @@ fn export_composited(
         // Killing FFmpeg from a separate watcher unblocks a write to a stalled
         // encoder's full input pipe when the user cancels.
         scope.spawn(|| {
+            let mut last_frame = 0;
+            let mut last_advance = Instant::now();
             while !monitor_done.load(Ordering::Acquire) {
-                if cancel.load(Ordering::Relaxed) {
+                let frame = advancing_frames.load(Ordering::Relaxed);
+                if frame != last_frame {
+                    last_frame = frame;
+                    last_advance = Instant::now();
+                }
+                let timed_out = last_advance.elapsed() >= Duration::from_secs(300);
+                if cancel.load(Ordering::Acquire) || timed_out {
+                    stalled.store(timed_out, Ordering::Release);
                     child
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
@@ -1375,23 +1530,51 @@ fn export_composited(
         });
         let _finished = MonitorFinished(&monitor_done);
         let outcome = (|| {
-            for index in 0..frame_count {
+            // Bound queued pictures to 64 MiB (at most two frames). The writer
+            // owns the pipe so composition can overlap encoder backpressure.
+            let frame_bytes = width as usize * height as usize * 3;
+            let capacity = (64 * 1024 * 1024 / frame_bytes.max(1)).min(2);
+            let (pictures, pending) = std::sync::mpsc::sync_channel::<Arc<ImageBuf>>(capacity);
+            let collector = diagnostics::worker_collector();
+            let writer = scope.spawn(move || -> Result<(), String> {
+                for image in pending {
+                    if cancel.load(Ordering::Acquire) {
+                        return Err("Export cancelled".into());
+                    }
+                    let started = Instant::now();
+                    let result = stdin.write_all(&image.rgb);
+                    if let Some(collector) = &collector {
+                        collector.add_timing(ExportStage::PipeWrite, started.elapsed());
+                    }
+                    result.map_err(|_| "FFmpeg closed the video pipe".to_string())?;
+                }
+                Ok(())
+            });
+            let produced = (|| -> Result<(), String> {
+              for index in 0..frame_count {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Export cancelled".into());
                 }
                 let frame = frame_policy.frame(index);
                 let image = last_composite.get_or_render(frame, || {
-                    let image = composite(project, frame, width, height, &mut source);
+                    let image = diagnostics::measure(ExportStage::Composition, || composite(project, frame, width, height, &mut source));
                     if let Some(error) = source.take_decode_error() {
                         return Err(format!("Could not render frame {frame}: {error}"));
                     }
                     Ok(image)
                 })?;
-                stdin
-                    .write_all(&image.rgb)
+                pictures.send(image)
                     .map_err(|_| "FFmpeg closed the video pipe".to_string())?;
+              }
+              Ok(())
+            })();
+            drop(pictures);
+            if produced.is_err() {
+                child.lock().unwrap_or_else(|error| error.into_inner()).stop();
             }
-            drop(stdin);
+            let written = writer.join().map_err(|_| "Export pipe worker stopped unexpectedly")?;
+            produced?;
+            written?;
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Export cancelled".into());
@@ -1419,7 +1602,9 @@ fn export_composited(
     let _ = progress_thread.join();
     let err_text = err_thread.join().unwrap_or_default();
     let status = outcome.map_err(|error| {
-        if error == "FFmpeg closed the video pipe" && !err_text.trim().is_empty() {
+        if stalled.load(Ordering::Acquire) {
+            "Export produced no new encoded frames for five minutes; the existing output is preserved".into()
+        } else if error == "FFmpeg closed the video pipe" && !err_text.trim().is_empty() {
             err_text.trim().to_string()
         } else {
             error

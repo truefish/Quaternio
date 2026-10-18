@@ -100,7 +100,7 @@ def main():
         run("git", "push", "--atomic", "origin", "main", f"refs/tags/{tag}")
     except RuntimeError as error:
         raise RuntimeError(f"{error}\nCommit and tag remain local. Retry: git push --atomic origin main {tag}") from error
-    print(f"Published {tag}. GitHub Actions will build and attach the release packages.")
+    print(f"Pushed {tag}. GitHub Actions must finish successfully before the release packages appear.")
 
 
 if __name__ == "__main__":
