@@ -52,7 +52,6 @@ pub fn find_ffmpeg() -> Result<PathBuf, String> {
 
 pub fn find_ffprobe() -> Result<PathBuf, String> {
     find_tool("ffprobe")
-        .or_else(|| find_tool("ffmpeg"))
         .ok_or_else(|| "ffprobe was not found next to Quaternio or on PATH.".to_string())
 }
 
@@ -102,6 +101,17 @@ fn command_output_with_cancels(
     cancel: &AtomicBool,
     request: Option<&AtomicBool>,
 ) -> Result<std::process::Output, String> {
+    command_output_with_deadline(tool, args, cancel, request, None)
+}
+
+fn command_output_with_deadline(
+    tool: &Path,
+    args: &[String],
+    cancel: &AtomicBool,
+    request: Option<&AtomicBool>,
+    timeout: Option<Duration>,
+) -> Result<std::process::Output, String> {
+    let started = std::time::Instant::now();
     let cancelled = || {
         cancel.load(Ordering::Acquire) || request.is_some_and(|flag| flag.load(Ordering::Acquire))
     };
@@ -138,7 +148,7 @@ fn command_output_with_cancels(
             stderr.read_to_end(&mut bytes).map(|_| bytes)
         });
         let status = loop {
-            if cancelled() {
+            if cancelled() || timeout.is_some_and(|limit| started.elapsed() >= limit) {
                 let _ = process.child.kill();
             }
             match process.child.try_wait() {
@@ -158,6 +168,9 @@ fn command_output_with_cancels(
         let stderr_result = errors.join().map_err(|_| "Decoder error reader failed")?;
         if cancelled() {
             return Err("Media decode cancelled".into());
+        }
+        if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+            return Err("Media metadata probe timed out".into());
         }
         let bytes = stdout_result.map_err(|error| error.to_string())?;
         let stderr = stderr_result.map_err(|error| error.to_string())?;
@@ -311,27 +324,42 @@ fn parse_rate(text: &str) -> Option<f64> {
 }
 
 pub fn probe_path(path: &Path) -> Result<Media, String> {
+    probe_path_cancellable(path, &AtomicBool::new(false))
+}
+
+/// Metadata probes share the decoder's kill/reap path, with a finite deadline.
+/// Imports can cancel active ffprobe processes instead of waiting for a file.
+pub fn probe_path_cancellable(path: &Path, cancel: &AtomicBool) -> Result<Media, String> {
     let before = origin_stamp(path);
     let tool = find_ffprobe()?;
-    let output = command_output(
+    let output = command_output_with_deadline(
         &tool,
         &[
             "-v".into(),
             "error".into(),
             "-print_format".into(),
             "json".into(),
-            "-show_format".into(),
-            "-show_streams".into(),
+            "-show_entries".into(),
+            "format=duration,start_time:stream=index,codec_type,width,height,r_frame_rate,avg_frame_rate,nb_frames,duration,start_time:stream_disposition=attached_pic".into(),
             path.display().to_string(),
         ],
+        cancel,
+        None,
+        Some(Duration::from_secs(30)),
     )?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(if err.trim().is_empty() {
             format!("Could not read {}", path.display())
         } else {
-            err.trim().to_string()
+            err.trim().chars().take(2048).collect()
         });
+    }
+    if cancel.load(Ordering::Acquire) {
+        return Err("Media import cancelled".into());
+    }
+    if before != origin_stamp(path) {
+        return Err(format!("Source changed during metadata probe: {}", path.display()));
     }
     let json = String::from_utf8_lossy(&output.stdout);
     if let Ok(origin) = probe_video_origin(&json) {

@@ -7,9 +7,10 @@ mod navigation;
 mod audio_mix;
 mod export_form;
 mod media_selection;
+mod media_import;
 
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +27,7 @@ use crate::commands::{self, Scope, ACTIONS};
 use crate::export::{
     export_mp4, export_range, EncoderPreference, ExportProgress, ExportSettings, RenderSpeed };
 use crate::playback;
-use crate::playback::{probe_path, AudioEngine, ImageBuf, PreviewEngine, PreviewIntent, ThumbnailEngine};
+use crate::playback::{AudioEngine, ImageBuf, PreviewEngine, PreviewIntent, ThumbnailEngine};
 use crate::preferences::{Layout, Preferences};
 use crate::project::{
     format_timecode, frame_rate_presets, sequence_presets, Clip, FrameRate, Media, MediaKind,
@@ -123,7 +124,13 @@ enum ImportEvent {
     Media(Media),
     Relink(u64, Media),
     Error(String),
+    DiscoveryError(String),
     Done }
+
+enum UpdateEvent {
+    Releases(Result<Vec<crate::update::Release>, String>),
+    Applied(Result<(), String>),
+}
 
 #[derive(Clone, Copy)]
 struct MediaDrag {
@@ -219,6 +226,15 @@ struct AppState {
     filter_kind: i32,
     inspector_seen: i32,
     import_rx: Option<Receiver<ImportEvent>>,
+    import_job: Option<media_import::Job>,
+    media_availability: media_import::Availability,
+    import_cancel: Arc<AtomicBool>,
+    import_batch: Vec<Media>,
+    import_processed: usize,
+    import_last_refresh: Instant,
+    import_last_error: String,
+    import_status: String,
+    import_queue_skipped: usize,
     import_count: usize,
     import_errors: usize,
     relinking: bool,
@@ -234,6 +250,12 @@ struct AppState {
     version_rows: Vec<VersionRow>,
     versions_status: String,
     versions_busy: bool,
+    releases: Vec<crate::update::Release>,
+    update_rx: Option<Receiver<UpdateEvent>>,
+    update_applying: bool,
+    update_quiet: bool,
+    update_refresh_queued: bool,
+    update_agree_request: Option<Option<String>>,
     media_drag_origin: Option<MediaDrag>,
     pending_insert: Option<PendingInsert>,
     sequence_match_offered: bool,
@@ -367,6 +389,15 @@ impl AppState {
             query: String::new(),
             filter_kind: 0,
             import_rx: None,
+            import_job: None,
+            media_availability: media_import::Availability::default(),
+            import_cancel: Arc::new(AtomicBool::new(false)),
+            import_batch: Vec::new(),
+            import_processed: 0,
+            import_last_refresh: Instant::now(),
+            import_last_error: String::new(),
+            import_status: String::new(),
+            import_queue_skipped: 0,
             import_count: 0,
             import_errors: 0,
             relinking: false,
@@ -382,6 +413,12 @@ impl AppState {
             version_rows: Vec::new(),
             versions_status: String::new(),
             versions_busy: false,
+            releases: Vec::new(),
+            update_rx: None,
+            update_applying: false,
+            update_quiet: false,
+            update_refresh_queued: false,
+            update_agree_request: None,
             media_drag_origin: None,
             pending_insert: None,
             sequence_match_offered: false,
@@ -390,6 +427,12 @@ impl AppState {
             media_sort: media_selection::MediaSort::default(),
             native_events: None,
             live: None }
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        self.import_cancel.store(true, Ordering::Release);
     }
 }
 
@@ -486,7 +529,9 @@ pub fn run() -> anyhow::Result<()> {
                     );
                 }
                 tick(&ui, &timer_state);
-                live::tick(&ui, &timer_state);
+                if !timer_state.borrow().update_applying {
+                    live::tick(&ui, &timer_state);
+                }
             }
         },
     );
@@ -549,6 +594,9 @@ fn wire(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     let close_state = state.clone();
     ui.window().on_close_requested(move || {
         if let Some(ui) = close_ui.upgrade() {
+            if close_state.borrow().update_applying {
+                return slint::CloseRequestResponse::KeepWindowShown;
+            }
             if close_state.borrow().live.is_some() {
                 live::close(&ui, &close_state);
                 return slint::CloseRequestResponse::KeepWindowShown;
@@ -877,7 +925,7 @@ fn on_key(
     shift: bool,
     alt: bool,
 ) {
-    if ui.get_live_reloading() {
+    if ui.get_live_reloading() || state.borrow().update_applying {
         return;
     }
     if ui.get_show_sequence_match() {
@@ -888,6 +936,20 @@ fn on_key(
     }
     if ui.get_capturing_binding() {
         capture_binding(ui, state, key, Mods { ctrl, shift, alt });
+        return;
+    }
+    if ui.get_modal_open() {
+        if key == "escape" {
+            ui.set_show_dialog(false);
+            ui.set_show_prefs(false);
+            ui.set_show_about(false);
+            ui.set_show_import_mode(false);
+            ui.set_show_import_report(false);
+            ui.set_show_export_details(false);
+            ui.set_show_update_agree(false);
+            state.borrow_mut().timeline_import_path = None;
+            clear_update_agree(state);
+        }
         return;
     }
     if ui.get_show_command_palette() {
@@ -919,14 +981,6 @@ fn on_key(
                 }
             }
             _ => {}
-        }
-        return;
-    }
-    if ui.get_show_dialog() || ui.get_show_prefs() || ui.get_show_about() {
-        if key == "escape" {
-            ui.set_show_dialog(false);
-            ui.set_show_prefs(false);
-            ui.set_show_about(false);
         }
         return;
     }
@@ -1361,6 +1415,9 @@ fn reveal_track(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, explic
 }
 
 fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command: &str) {
+    // The update function exits after launching its helper. Keep the modal up
+    // until it returns so no edits can race that exit after the unsaved guard.
+    if state.borrow().update_applying { return; }
     if matches!(command, "zoom-in" | "zoom-out" | "zoom-fit") {
         state.borrow().waveform_engine.set_busy(true);
         state.borrow().filmstrips.set_busy(true);
@@ -1579,6 +1636,10 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
         }
         "import" => {
             import_media(ui, state);
+            return;
+        }
+        "import-cancel" => {
+            cancel_import(ui, state);
             return;
         }
         "import-timeline" => {
@@ -2037,6 +2098,7 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             ui.set_show_prefs(false);
             ui.set_show_import_mode(false);
             ui.set_show_import_report(false);
+            ui.set_show_export_details(false);
             ui.set_show_update_agree(false);
             ui.set_open_menu(0);
             ui.set_show_command_palette(false);
@@ -3249,6 +3311,32 @@ fn export_terminal_status(error: Option<&str>) -> JobStatus {
         Some(_) => JobStatus::Failed }
 }
 
+fn take_export_progress(rx: &Receiver<ExportProgress>) -> Option<ExportProgress> {
+    let mut last: Option<ExportProgress> = None;
+    for _ in 0..128 {
+        match rx.try_recv() {
+            Ok(item) => {
+                let done = item.done;
+                last = Some(item);
+                if done { break; }
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let message = "Export worker stopped without a completion result. The output may be incomplete; retry the export.".to_string();
+                return Some(ExportProgress {
+                    fraction: last.as_ref().map_or(0.0, |item| item.fraction),
+                    preparation: None,
+                    remaining_seconds: None,
+                    message: message.clone(),
+                    done: true,
+                    error: Some(message),
+                });
+            }
+        }
+    }
+    last
+}
+
 fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     audio_mix::sync_meters(ui, state);
     {
@@ -3307,6 +3395,18 @@ fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     }
     scroll_media_drag(ui, state);
     pump_import(ui, state);
+    pump_updates(ui, state);
+    let availability_changed = {
+        let mut current = state.borrow_mut();
+        let revision = current.edit_gen;
+        if current.media_drag_origin.is_some() {
+            false
+        } else {
+            let AppState { media_availability, editor, .. } = &mut *current;
+            media_availability.poll(revision, &editor.project.media)
+        }
+    };
+    if availability_changed { sync_imported_media(ui, state); }
     let quality = ui.get_quality();
     {
         let mut state = state.borrow_mut();
@@ -3417,13 +3517,7 @@ fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
         current.status = message;
         ui.set_status_text(SharedString::from(current.status.clone()));
     }
-    let progress = state.borrow_mut().export_rx.as_ref().and_then(|rx| {
-        let mut last = None;
-        while let Ok(item) = rx.try_recv() {
-            last = Some(item);
-        }
-        last
-    });
+    let progress = state.borrow().export_rx.as_ref().and_then(take_export_progress);
     if let Some(progress) = progress {
         ui.set_export_progress(progress.fraction);
         ui.set_export_preparing(progress.preparation.is_some() && !progress.done);
@@ -3434,7 +3528,8 @@ fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
         state.borrow_mut().export_eta_at = (!eta.is_empty()).then(Instant::now);
         ui.set_export_eta(eta.into());
         ui.set_export_cancelling(cancelling);
-        ui.set_export_message(if cancelling { "Cancelling…".into() } else { SharedString::from(progress.message.clone()) });
+        let message = progress.error.as_deref().unwrap_or(&progress.message);
+        ui.set_export_message(if cancelling { "Cancelling…".into() } else { SharedString::from(message) });
         {
             let mut current = state.borrow_mut();
             let job_id = current.export_job_id;
@@ -3444,7 +3539,7 @@ fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
                 .iter_mut()
                 .find(|job| Some(job.id) == job_id)
             {
-                job.message = progress.message.clone();
+                job.message = message.to_string();
                 if progress.done {
                     job.status = export_terminal_status(progress.error.as_deref());
                 }
@@ -4058,7 +4153,7 @@ fn sync_source_controls(ui: &AppWindow, state: &AppState) {
         ui.set_source_out_position(1.0);
         ui.set_source_range_label("Select media to preview and mark a range.".into());
         ui.set_source_placeholder(
-            "Select media in the Project bin to preview, scrub, and mark In/Out.".into(),
+            "Select a file in Media to preview it and mark In/Out.".into(),
         );
     }
 }
@@ -4277,7 +4372,7 @@ fn wheel_text(value: f32) -> SharedString {
 
 fn full_sync(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     sync_media_selection(&mut state.borrow_mut());
-    sync_update_ui(ui, state);
+    sync_import_ui(ui, &state.borrow());
     {
         let current = state.borrow();
         ui.set_project_selected_count(current.media_selection.ids.len() as i32);
@@ -4876,7 +4971,7 @@ fn bin_views(state: &AppState) -> Vec<BinItem> {
                 tc_out: tc_out.into(),
                 duration: duration.into(),
                 fps: fps.into(),
-                offline: !media.path.exists() }
+                offline: state.media_availability.known(&media.path) == Some(false) }
         })
         .collect()
 }
@@ -5186,9 +5281,9 @@ fn pump_source_preview(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>)
         current.source_requested = None;
         current.source_min_token = current.source_token.saturating_add(1);
         current.source_error = None;
-        // Probe once on media identity/metadata changes, rather than statting
-        // paths every UI frame or while a long network source is playing.
-        current.source_usable = media.path.is_file();
+        // Presence is refreshed off-thread; the preview worker surfaces decode
+        // errors for paths whose availability has not been checked yet.
+        current.source_usable = current.media_availability.known(&media.path).unwrap_or(true);
         if !current.source_usable {
             current.source_feedback.fail("Media is offline. Relink it in Project.".into());
         }
@@ -5435,6 +5530,10 @@ fn open_project(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     else {
         return;
     };
+    open_project_path(ui, state, path);
+}
+
+fn open_project_path(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, path: PathBuf) {
     match Project::load_from(&path) {
         Ok(project) => {
             if !confirm_unsaved(ui, state) {
@@ -5558,22 +5657,27 @@ fn relink_media(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
         return;
     };
     let (tx, rx) = mpsc::sync_channel(2);
+    let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut current = state.borrow_mut();
         current.import_rx = Some(rx);
+        current.import_job = None;
+        current.import_cancel = cancel.clone();
+        current.import_batch.clear();
+        current.import_processed = 0;
         current.import_count = 0;
         current.import_errors = 0;
+        current.import_last_error.clear();
         current.relinking = true;
-        current.status = "Reading replacement media…".into();
+        update_import_status(&mut current, false);
     }
     full_sync(ui, state);
     std::thread::spawn(move || {
-        let event = match probe_path(&path) {
+        let event = match playback::probe_path_cancellable(&path, &cancel) {
             Ok(media) => ImportEvent::Relink(id, media),
             Err(error) => ImportEvent::Error(error) };
-        if tx.send(event).is_ok() {
-            let _ = tx.send(ImportEvent::Done);
-        }
+        if !cancel.load(Ordering::Acquire) { let _ = tx.send(event); }
+        let _ = tx.send(ImportEvent::Done);
     });
 }
 
@@ -5612,194 +5716,201 @@ fn clear_update_agree(state: &Rc<std::cell::RefCell<AppState>>) {
     current.update_agree_url = None;
     current.update_agree_title.clear();
     current.update_agree_body.clear();
+    current.update_agree_request = None;
 }
 
 fn open_update_agree_for_latest(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
-    let tag = crate::update::list_releases(false)
-        .ok()
-        .and_then(|list| crate::update::latest_update(&list).map(|r| r.tag_name.clone()));
-    if let Some(tag) = tag {
-        open_update_agree_for_tag(ui, state, &tag);
-    } else {
+    if state.borrow().update_applying { return; }
+    if state.borrow().releases.is_empty() {
+        state.borrow_mut().update_agree_request = Some(None);
+        refresh_versions(ui, state, false);
+        return;
+    }
+    let tag = crate::update::latest_update(&state.borrow().releases).map(|r| r.tag_name.clone());
+    if let Some(tag) = tag { open_update_agree_for_tag(ui, state, &tag); }
+    else {
         set_status(state, "No newer release found".into());
-        full_sync(ui, state);
+        ui.set_status_text(state.borrow().status.clone().into());
     }
 }
 
 fn open_update_agree_for_tag(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, tag: &str) {
-    let release = match crate::update::list_releases(false)
-        .ok()
-        .and_then(|list| crate::update::find_release(&list, tag).cloned())
-    {
-        Some(release) => release,
-        None => {
-            set_status(state, format!("Release {tag} not found"));
-            full_sync(ui, state);
-            return;
-        }
+    if state.borrow().update_applying { return; }
+    let release = crate::update::find_release(&state.borrow().releases, tag).cloned();
+    let Some(release) = release else {
+        state.borrow_mut().update_agree_request = Some(Some(tag.to_string()));
+        refresh_versions(ui, state, false);
+        return;
     };
-    let current = crate::update::CURRENT_VERSION;
-    let target = release.display_tag().to_string();
-    let action = if release.matches_current() {
-        "Reinstall"
-    } else if release.is_newer_than_current() {
-        "Update"
-    } else {
-        "Switch"
-    };
+    show_release_agreement(ui, state, &release);
+}
+
+fn show_release_agreement(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, release: &crate::update::Release) {
+    let action = if release.matches_current() { "Reinstall" }
+        else if release.is_newer_than_current() { "Update" } else { "Switch" };
     {
-        let mut current_state = state.borrow_mut();
-        current_state.update_agree_tag = Some(release.tag_name.clone());
-        current_state.update_agree_url = Some(release.html_url.clone());
-        current_state.update_agree_title = format!("{action} to {target}?");
-        current_state.update_agree_body = format!(
-            "Running {current}. Choose automatic replace for this install, or open the GitHub download page."
-        );
+        let mut current = state.borrow_mut();
+        current.update_agree_tag = Some(release.tag_name.clone());
+        current.update_agree_url = Some(release.html_url.clone());
+        current.update_agree_title = format!("{action} to {}?", release.display_tag());
+        current.update_agree_body = format!(
+            "Running {}. Choose automatic replace for this install, or open the GitHub download page.",
+            crate::update::CURRENT_VERSION);
     }
     sync_update_ui(ui, state);
     ui.set_show_update_agree(true);
 }
 
 fn apply_release_tag(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, tag: &str) {
-    set_status(state, format!("Downloading {tag}…"));
-    full_sync(ui, state);
-    let release = match crate::update::list_releases(false)
-        .ok()
-        .and_then(|list| crate::update::find_release(&list, tag).cloned())
     {
-        Some(release) => release,
-        None => {
-            set_status(state, format!("Release {tag} not found"));
-            full_sync(ui, state);
+        let current = state.borrow();
+        if current.update_applying { return; }
+        if current.update_rx.is_some() || current.import_rx.is_some() || current.export_running
+            || current.queue_active || ui.get_live_reloading()
+        {
+            drop(current);
+            set_status(state, "Finish imports, exports, or the current release check before updating".into());
+            ui.set_status_text(state.borrow().status.clone().into());
             return;
         }
+    }
+    // Agreement rows come from an owned in-memory snapshot. No network or disk
+    // cache read is hidden behind a click or a normal editor full_sync.
+    let release = crate::update::find_release(&state.borrow().releases, tag).cloned();
+    let Some(release) = release else {
+        set_status(state, format!("Release {tag} unavailable; refresh Versions first"));
+        ui.set_status_text(state.borrow().status.clone().into());
+        return;
     };
     if crate::update::pick_asset(&release).is_none() {
-        set_status(
-            state,
-            format!("No portable build for this platform in {tag}; open the download page instead"),
-        );
-        full_sync(ui, state);
+        set_status(state, format!("No portable build for this platform in {tag}; open the download page instead"));
+        ui.set_status_text(state.borrow().status.clone().into());
         return;
     }
-    match crate::update::download_and_apply(&release) {
-        Ok(()) => {}
-        Err(err) => {
-            set_status(state, err);
-            full_sync(ui, state);
-        }
+    if !confirm_unsaved(ui, state) { return; }
+    stop_play(state);
+    let (tx, rx) = mpsc::sync_channel(1);
+    {
+        let mut current = state.borrow_mut();
+        current.source.stop();
+        current.audio.stop();
+        current.update_rx = Some(rx);
+        current.update_applying = true;
+        current.versions_busy = true;
+        current.status = format!("Downloading {tag}...");
+        current.versions_status = current.status.clone();
+        current.update_agree_title = format!("Installing {tag}");
+        current.update_agree_body = "Downloading and preparing the update. Editing is paused; Quaternio will restart when it is ready.".into();
     }
-}
-
-fn refresh_versions(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, force: bool) {
-    state.borrow_mut().versions_busy = true;
-    state.borrow_mut().versions_status = if force {
-        "Refreshing releases…".into()
-    } else {
-        "Loading releases…".into()
-    };
+    ui.set_open_menu(0);
+    ui.set_show_command_palette(false);
+    ui.set_show_update_agree(true);
     sync_update_ui(ui, state);
-    match crate::update::list_releases(force) {
-        Ok(releases) => {
-            let rows: Vec<VersionRow> = releases
-                .iter()
-                .map(|release| VersionRow {
-                    tag: SharedString::from(release.tag_name.as_str()),
-                    date: SharedString::from(release.published_label()),
-                    prerelease: release.prerelease,
-                    current: release.matches_current(),
-                    html_url: SharedString::from(release.html_url.as_str()),
-                })
-                .collect();
-            let latest = crate::update::latest_update(&releases).cloned();
-            let mut current = state.borrow_mut();
-            current.version_rows = rows;
-            current.versions_busy = false;
-            current.versions_status = if current.version_rows.is_empty() {
-                "No published releases yet.".into()
-            } else {
-                format!("{} releases", current.version_rows.len())
-            };
-            if let Some(latest) = latest {
-                current.update_available = true;
-                current.update_tooltip = format!(
-                    "Update available: {} → {}",
-                    crate::update::CURRENT_VERSION,
-                    latest.display_tag()
-                );
-            } else {
-                current.update_available = false;
-                current.update_tooltip.clear();
-            }
-        }
-        Err(err) => {
-            {
-                let mut current = state.borrow_mut();
-                current.versions_busy = false;
-                current.versions_status = err.clone();
-            }
-            set_status(state, err);
-        }
-    }
-    full_sync(ui, state);
-}
-
-fn start_background_update_check(ui: &AppWindow, _state: &Rc<std::cell::RefCell<AppState>>) {
-    // Slint Weak is Send; AppState lives in a thread-local (same as preview wakes).
-    let weak_ui = Arc::new(std::sync::Mutex::new(ui.as_weak()));
+    ui.set_status_text(state.borrow().status.clone().into());
     std::thread::spawn(move || {
-        let result = crate::update::list_releases(false);
-        let weak_ui = weak_ui.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let _ = slint::invoke_from_event_loop(move || {
-            let Some(ui) = weak_ui.upgrade() else {
-                return;
-            };
-            PREVIEW_UI_STATE.with(|slot| {
-                let Some(state) = slot.borrow().upgrade() else {
-                    return;
-                };
-                match result {
-                    Ok(releases) => {
-                        let rows: Vec<VersionRow> = releases
-                            .iter()
-                            .map(|release| VersionRow {
-                                tag: SharedString::from(release.tag_name.as_str()),
-                                date: SharedString::from(release.published_label()),
-                                prerelease: release.prerelease,
-                                current: release.matches_current(),
-                                html_url: SharedString::from(release.html_url.as_str()),
-                            })
-                            .collect();
-                        let latest = crate::update::latest_update(&releases).cloned();
-                        {
-                            let mut current = state.borrow_mut();
-                            current.version_rows = rows;
-                            if let Some(latest) = latest {
-                                current.update_available = true;
-                                current.update_tooltip = format!(
-                                    "Update available: {} → {}",
-                                    crate::update::CURRENT_VERSION,
-                                    latest.display_tag()
-                                );
-                            }
-                        }
-                        sync_update_ui(&ui, &state);
-                    }
-                    Err(_) => {
-                        // Quiet on startup — Versions tab can surface errors on Refresh.
-                    }
-                }
-            });
-        });
+        let _ = tx.send(UpdateEvent::Applied(crate::update::download_and_apply(&release)));
     });
 }
 
+fn request_releases(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, force: bool, quiet: bool) {
+    let mut current = state.borrow_mut();
+    if current.update_applying { return; }
+    if current.update_rx.is_some() {
+        current.update_refresh_queued |= force;
+        current.update_quiet &= quiet;
+        return;
+    }
+    let (tx, rx) = mpsc::sync_channel(1);
+    current.update_rx = Some(rx);
+    current.update_quiet = quiet;
+    current.versions_busy = true;
+    current.versions_status = if force { "Refreshing releases..." } else { "Loading releases..." }.into();
+    drop(current);
+    sync_update_ui(ui, state);
+    // Only Send data crosses this channel. AppState/Rc/Slint models stay on UI.
+    std::thread::spawn(move || {
+        let _ = tx.send(UpdateEvent::Releases(crate::update::list_releases(force)));
+    });
+}
+
+fn refresh_versions(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, force: bool) {
+    request_releases(ui, state, force, false);
+}
+
+fn start_background_update_check(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    request_releases(ui, state, false, true);
+}
+
+fn pump_updates(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    let event = match state.borrow().update_rx.as_ref().map(|rx| rx.try_recv()) {
+        None | Some(Err(mpsc::TryRecvError::Empty)) => return,
+        Some(Ok(event)) => event,
+        Some(Err(mpsc::TryRecvError::Disconnected)) => {
+            let error = Err("Update worker stopped unexpectedly".into());
+            if state.borrow().update_applying { UpdateEvent::Applied(error) }
+            else { UpdateEvent::Releases(Err("Release worker stopped unexpectedly".into())) }
+        }
+    };
+    let mut current = state.borrow_mut();
+    current.update_rx = None;
+    current.versions_busy = false;
+    let mut agreement = None;
+    match event {
+        UpdateEvent::Releases(result) => {
+            match result {
+                Ok(releases) => {
+                    current.version_rows = releases.iter().map(|release| VersionRow {
+                        tag: release.tag_name.as_str().into(),
+                        date: release.published_label().into(),
+                        prerelease: release.prerelease,
+                        current: release.matches_current(),
+                        html_url: release.html_url.as_str().into(),
+                    }).collect();
+                    current.versions_status = if releases.is_empty() { "No published releases yet.".into() }
+                        else { format!("{} releases", releases.len()) };
+                    let latest = crate::update::latest_update(&releases);
+                    current.update_available = latest.is_some();
+                    current.update_tooltip = latest.map(|release| format!("Update available: {} -> {}",
+                        crate::update::CURRENT_VERSION, release.display_tag())).unwrap_or_default();
+                    if let Some(request) = current.update_agree_request.take() {
+                        agreement = match request {
+                            Some(tag) => crate::update::find_release(&releases, &tag).cloned(),
+                            None => latest.cloned(),
+                        };
+                        if agreement.is_none() { current.status = "Requested release is not available".into(); }
+                    }
+                    current.releases = releases;
+                }
+                Err(error) => {
+                    current.versions_status = error.clone();
+                    if !current.update_quiet { current.status = error; }
+                    current.update_agree_request = None;
+                }
+            }
+        }
+        UpdateEvent::Applied(result) => {
+            current.update_applying = false;
+            ui.set_show_update_agree(false);
+            current.status = match result {
+                Ok(()) => "Update prepared; restarting...".into(),
+                Err(error) => error,
+            };
+            current.versions_status = current.status.clone();
+            current.update_agree_title.clear();
+            current.update_agree_body.clear();
+        }
+    }
+    let refresh = std::mem::take(&mut current.update_refresh_queued);
+    ui.set_status_text(current.status.clone().into());
+    drop(current);
+    sync_update_ui(ui, state);
+    if let Some(release) = agreement { show_release_agreement(ui, state, &release); }
+    if refresh { request_releases(ui, state, true, false); }
+}
+
 fn begin_timeline_import(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
-    let mut dialog = rfd::FileDialog::new().set_title("Import Premiere / Resolve timeline");
+    let mut dialog = rfd::FileDialog::new().set_title("Import FCPXML timeline");
     dialog = dialog
-        .add_filter("Premiere / Resolve / FCPXML", &["prproj", "drp", "fcpxml", "xml"])
-        .add_filter("Premiere project", &["prproj"])
-        .add_filter("DaVinci Resolve project", &["drp"])
         .add_filter("FCPXML / XML", &["fcpxml", "xml"]);
     let Some(path) = dialog.pick_file() else {
         return;
@@ -5889,7 +6000,25 @@ fn handle_dropped_files(
     paths: Vec<PathBuf>,
 ) {
     ui.set_file_drop_hover(false);
+    if ui.get_modal_open() || ui.get_live_reloading()
+        || state.borrow().export_running || state.borrow().update_applying
+    {
+        set_status(state, "Finish the current dialog, export, or restart before dropping files".into());
+        ui.set_status_text(state.borrow().status.clone().into());
+        return;
+    }
     if paths.is_empty() {
+        return;
+    }
+    if let Some(path) = paths.iter().find(|path| path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("quaternio")))
+    {
+        open_project_path(ui, state, path.clone());
+        if paths.len() > 1 {
+            let message = format!("{}; drop the other {} paths separately", state.borrow().status, paths.len() - 1);
+            set_status(state, message);
+            ui.set_status_text(state.borrow().status.clone().into());
+        }
         return;
     }
     let mut media = Vec::new();
@@ -5919,174 +6048,261 @@ fn handle_dropped_files(
 }
 
 fn import_paths(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, paths: Vec<PathBuf>) {
-    if paths.is_empty() {
+    if paths.is_empty() { return; }
+    let mut current = state.borrow_mut();
+    let mut known: HashSet<_> = current.editor.project.media.iter()
+        .map(|media| media_import::path_key(&media.path)).collect();
+    known.extend(current.pending_imports.iter().map(|path| media_import::path_key(path)));
+    if let Some(job) = &current.import_job {
+        known.extend(job.paths.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
+    }
+    for path in paths {
+        if !known.insert(media_import::path_key(&path)) { continue; }
+        if current.pending_imports.len() >= media_import::MAX_ROOTS {
+            current.import_queue_skipped += 1;
+        } else {
+            current.pending_imports.push_back(path);
+        }
+    }
+    if current.import_rx.is_some() {
+        update_import_status(&mut current, false);
+        sync_import_ui(ui, &current);
         return;
     }
-    if state.borrow().import_rx.is_some() {
-        let mut current = state.borrow_mut();
-        let mut skipped = 0;
-        for path in paths {
-            if current.pending_imports.contains(&path) {
-                continue;
-            }
-            if current.pending_imports.len() >= 1024 {
-                skipped += 1;
-            } else {
-                current.pending_imports.push_back(path);
-            }
-        }
-        current.status = if skipped == 0 {
-            format!("Importing; {} files queued", current.pending_imports.len())
-        } else {
-            format!(
-                "Importing; {} files queued, {skipped} skipped at queue limit",
-                current.pending_imports.len()
-            )
-        };
+    if current.pending_imports.is_empty() {
+        current.import_status = "Media already imported or queued".into();
+        current.status = current.import_status.clone();
+        sync_import_ui(ui, &current);
         ui.set_status_text(current.status.clone().into());
         return;
     }
-    let (tx, rx) = mpsc::sync_channel(16);
-    {
-        let mut current = state.borrow_mut();
-        current.import_rx = Some(rx);
-        current.import_count = 0;
-        current.import_errors = 0;
-        current.relinking = false;
-        current.status = format!("Importing {} files…", paths.len());
-    }
-    full_sync(ui, state);
-    let import_bin = state.borrow().current_bin.clone();
-    std::thread::spawn(move || {
-        for path in paths {
-            let event = match probe_path(&path) {
-                Ok(mut media) => {
-                    media.bin = import_bin.clone();
-                    ImportEvent::Media(media)
-                }
-                Err(error) => ImportEvent::Error(error) };
-            if tx.send(event).is_err() {
-                return;
-            }
-        }
-        let _ = tx.send(ImportEvent::Done);
-    });
+    start_next_import(&mut current, true);
+    sync_import_ui(ui, &current);
+    ui.set_status_text(current.status.clone().into());
 }
 
-fn add_imported_media(editor: &mut timeline::Editor, media: Vec<Media>) -> Result<usize, String> {
-    if media.is_empty() {
-        return Ok(0);
+fn start_next_import(current: &mut AppState, reset_counts: bool) {
+    let paths = current.pending_imports.drain(..).collect();
+    let existing = current.editor.project.media.iter().map(|media| media.path.clone()).collect();
+    let (job, rx) = media_import::start(paths, existing, current.current_bin.clone());
+    current.import_cancel = job.cancel.clone();
+    current.import_job = Some(job);
+    current.import_rx = Some(rx);
+    current.import_processed = 0;
+    current.import_batch.clear();
+    current.import_last_refresh = Instant::now();
+    current.relinking = false;
+    if reset_counts {
+        current.import_count = 0;
+        current.import_errors = 0;
+        current.import_last_error.clear();
     }
+    update_import_status(current, false);
+}
+
+fn add_imported_media(editor: &mut timeline::Editor, mut media: Vec<Media>) -> Result<usize, String> {
+    // Recheck the live project: an intervening undo, timeline merge or relink
+    // may have changed it since the worker captured its initial exclusions.
+    let mut known: HashSet<_> = editor.project.media.iter()
+        .map(|asset| media_import::path_key(&asset.path)).collect();
+    media.retain(|asset| known.insert(media_import::path_key(&asset.path)));
+    if media.is_empty() { return Ok(0); }
     let count = media.len();
     let selected = editor.edit("import-media", |project| {
-        let mut selected = None;
+        let mut first = None;
         for mut asset in media {
-            if !project.bins.contains(&asset.bin) {
-                asset.bin.clear();
-            }
-            selected = Some(project.add_media(asset));
+            if !project.bins.contains(&asset.bin) { asset.bin.clear(); }
+            let id = project.add_media(asset);
+            first.get_or_insert(id);
         }
-        Ok(selected)
+        Ok(first)
     })?;
-    editor.selected_media = selected;
+    // Do not change the source viewer on every incoming result.
+    if editor.selected_media.is_none() { editor.selected_media = selected; }
     Ok(count)
 }
 
-fn flush_import_batch(current: &mut AppState, media: &mut Vec<Media>) {
-    if media.is_empty() {
-        return;
-    }
-    let count = media.len();
-    match add_imported_media(&mut current.editor, std::mem::take(media)) {
+fn flush_import_batch(current: &mut AppState) -> bool {
+    if current.import_batch.is_empty() { return false; }
+    let count = current.import_batch.len();
+    let media = std::mem::take(&mut current.import_batch);
+    for asset in &media { current.media_availability.mark_present(&asset.path); }
+    match add_imported_media(&mut current.editor, media) {
         Ok(imported) => {
             current.import_count += imported;
-            current.status = format!("Imported {} files…", current.import_count);
-            note_borrowed(current);
+            if imported > 0 {
+                // Importing unplaced media changes the bin, not timeline pixels.
+                current.edit_gen = current.edit_gen.wrapping_add(1);
+                return true;
+            }
         }
         Err(error) => {
             current.import_errors += count;
-            current.status = error;
+            current.import_last_error = error;
         }
     }
+    false
+}
+
+fn sync_import_ui(ui: &AppWindow, current: &AppState) {
+    let total = current.import_job.as_ref()
+        .map(|job| job.progress.discovered.load(Ordering::Acquire)).unwrap_or(1);
+    let scanning = current.import_job.as_ref()
+        .is_some_and(|job| job.progress.scanning.load(Ordering::Acquire));
+    let progress = if current.import_rx.is_none() { 1.0 }
+        else if total == 0 { 0.0 }
+        else { (current.import_processed as f32 / total as f32).min(if scanning { 0.99 } else { 1.0 }) };
+    ui.set_import_busy(current.import_rx.is_some());
+    ui.set_import_progress(progress);
+    ui.set_import_status(current.import_status.clone().into());
+}
+
+fn update_import_status(current: &mut AppState, done: bool) {
+    let cancelled = current.import_cancel.load(Ordering::Acquire);
+    let (total, scanning, skipped, limited) = current.import_job.as_ref().map(|job| (
+        job.progress.discovered.load(Ordering::Acquire),
+        job.progress.scanning.load(Ordering::Acquire),
+        job.progress.skipped.load(Ordering::Acquire),
+        job.progress.limited.load(Ordering::Acquire),
+    )).unwrap_or((1, false, 0, false));
+    let mut status = if cancelled && done {
+        format!("Import cancelled; kept {} imported files", current.import_count)
+    } else if cancelled {
+        format!("Cancelling import; {} files imported", current.import_count)
+    } else if current.relinking {
+        if done && current.import_errors == 0 { "Media relinked".into() }
+        else if done { "Relink failed".into() }
+        else { "Reading replacement media…".into() }
+    } else if done {
+        format!("Imported {} files", current.import_count)
+    } else {
+        format!("{}{} / {} files checked; {} imported",
+            if scanning { "Scanning folders; " } else { "Importing; " },
+            current.import_processed, total, current.import_count)
+    };
+    if !current.pending_imports.is_empty() {
+        status.push_str(&format!("; {} paths queued", current.pending_imports.len()));
+    }
+    if skipped > 0 { status.push_str(&format!("; {skipped} duplicates/links skipped")); }
+    if limited { status.push_str("; folder scan limit reached"); }
+    if current.import_queue_skipped > 0 {
+        status.push_str(&format!("; {} paths skipped at queue limit", current.import_queue_skipped));
+    }
+    if current.import_errors > 0 {
+        status.push_str(&format!("; {} errors", current.import_errors));
+        if !current.import_last_error.is_empty() {
+            status.push_str(&format!(" ({})", current.import_last_error.chars().take(240).collect::<String>()));
+        }
+    }
+    current.import_status = status.clone();
+    current.status = status;
+}
+
+fn cancel_import(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    let mut current = state.borrow_mut();
+    if current.import_rx.is_none() { return; }
+    current.import_cancel.store(true, Ordering::Release);
+    current.pending_imports.clear();
+    // Keep the receiver until Done so workers finish before a new batch starts.
+    // Results already delivered are committed normally; existing edits survive.
+    update_import_status(&mut current, false);
+    sync_import_ui(ui, &current);
+    ui.set_status_text(current.status.clone().into());
+}
+
+fn sync_imported_media(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    let mut current = state.borrow_mut();
+    sync_media_selection(&mut current);
+    let bin = bin_views(&current);
+    ui.set_video_items(model(bin.iter().filter(|item| item.kind.as_str() != "A").cloned().collect()));
+    ui.set_audio_items(model(bin.iter().filter(|item| item.kind.as_str() == "A").cloned().collect()));
+    ui.set_has_media(!bin.is_empty());
+    ui.set_bin_items(model(bin));
+    ui.set_project_selected_count(current.media_selection.ids.len() as i32);
+    ui.set_has_selected_media(current.editor.selected_media.is_some());
+    ui.set_source_name(current.editor.selected_media.and_then(|id| current.editor.project.media(id))
+        .map(|media| media.name.as_str()).unwrap_or("No clip").into());
+    ui.set_window_title(format!("Quaternio — {}{}", current.editor.project.name,
+        if current.editor.dirty { "*" } else { "" }).into());
+    ui.set_can_undo(current.editor.can_undo());
+    ui.set_can_redo(current.editor.can_redo());
 }
 
 fn pump_import(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
-    let mut changed = false;
-    // One history snapshot for adjacent results available on this UI turn.
-    // Later arrivals stay separate so intervening user edits keep their order.
-    let mut media_batch = Vec::new();
-    for _ in 0..16 {
-        let event = state
-            .borrow()
-            .import_rx
-            .as_ref()
-            .and_then(|rx| rx.try_recv().ok());
-        let Some(event) = event else {
-            break;
-        };
-        let mut current = state.borrow_mut();
+    let mut current = state.borrow_mut();
+    if current.import_rx.is_none() { return; }
+    // Editor::edit commits gestures. Do not split a user's in-progress drag.
+    if current.pointer.down || current.editor.gesture_active()
+        || current.media_drag_origin.is_some() || current.source.scrub_origin.is_some()
+    {
+        return;
+    }
+    let started = Instant::now();
+    let mut done = false;
+    let mut relinked = false;
+    while current.import_batch.len() < media_import::BATCH_SIZE
+        && started.elapsed() < std::time::Duration::from_millis(2)
+    {
+        let event = current.import_rx.as_ref().unwrap().try_recv();
         match event {
-            ImportEvent::Media(media) => media_batch.push(media),
-            ImportEvent::Relink(id, media) => {
-                flush_import_batch(&mut current, &mut media_batch);
-                match current
-                    .editor
-                    .edit("relink-media", |project| project.relink_media(id, media))
-                {
+            Ok(ImportEvent::Media(media)) => {
+                current.import_processed += 1;
+                current.import_batch.push(media);
+            }
+            Ok(ImportEvent::Relink(id, media)) => {
+                current.import_processed += 1;
+                current.media_availability.mark_present(&media.path);
+                match current.editor.edit("relink-media", |project| project.relink_media(id, media)) {
                     Ok(()) => {
                         current.import_count += 1;
                         current.source_key = None;
-                        // Relinking may replace bytes at the same path with
-                        // unchanged probe metadata. Revalidate worker stamps.
                         current.filmstrips.reset();
                         note_borrowed(&mut current);
+                        relinked = true;
                     }
                     Err(error) => {
                         current.import_errors += 1;
-                        current.status = error;
+                        current.import_last_error = error;
                     }
                 }
             }
-            ImportEvent::Error(error) => {
-                flush_import_batch(&mut current, &mut media_batch);
+            Ok(ImportEvent::Error(error)) => {
+                current.import_processed += 1;
                 current.import_errors += 1;
-                current.status = error;
+                current.import_last_error = error;
             }
-            ImportEvent::Done => {
-                flush_import_batch(&mut current, &mut media_batch);
-                current.status = if current.relinking && current.import_errors == 0 {
-                    "Media relinked".into()
-                } else if current.relinking {
-                    current.status.clone()
-                } else if current.import_errors == 0 {
-                    format!("Imported {} files", current.import_count)
-                } else {
-                    format!(
-                        "Imported {} files; {} could not be read",
-                        current.import_count, current.import_errors
-                    )
-                };
-                current.import_rx = None;
-                current.relinking = false;
+            Ok(ImportEvent::DiscoveryError(error)) => {
+                current.import_errors += 1;
+                current.import_last_error = error;
+            }
+            Ok(ImportEvent::Done) => { done = true; break; }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                current.import_errors += 1;
+                current.import_last_error = "Import worker stopped unexpectedly".into();
+                done = true;
+                break;
             }
         }
-        changed = true;
     }
-    flush_import_batch(&mut state.borrow_mut(), &mut media_batch);
-    if changed {
-        full_sync(ui, state);
+    if !done && !relinked && current.import_last_refresh.elapsed() < media_import::REFRESH_INTERVAL {
+        return;
     }
-    let queued = {
-        let mut current = state.borrow_mut();
-        if current.import_rx.is_none() {
-            current.pending_imports.drain(..).collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        }
-    };
-    if !queued.is_empty() {
-        import_paths(ui, state, queued);
+    let changed = flush_import_batch(&mut current);
+    current.import_last_refresh = Instant::now();
+    update_import_status(&mut current, done);
+    if done {
+        current.import_rx = None;
+        current.import_job = None;
+        current.relinking = false;
+        if !current.pending_imports.is_empty() { start_next_import(&mut current, false); }
+        else { current.import_queue_skipped = 0; }
     }
+    sync_import_ui(ui, &current);
+    ui.set_status_text(current.status.clone().into());
+    drop(current);
+    if relinked { full_sync(ui, state); }
+    else if changed { sync_imported_media(ui, state); }
 }
 
 fn browse_export(ui: &AppWindow) {
@@ -6337,6 +6553,13 @@ fn binding_hint(state: &Rc<std::cell::RefCell<AppState>>, id: &str) -> SharedStr
 }
 
 fn reset_media_workers(state: &mut AppState) {
+    state.media_availability = media_import::Availability::default();
+    state.import_cancel.store(true, Ordering::Release);
+    state.import_job = None;
+    state.import_rx = None;
+    state.import_batch.clear();
+    state.relinking = false;
+    state.import_status.clear();
     state.media_selection = media_selection::MediaSelection::default();
     state.program_feedback.clear();
     state.source_feedback.clear();

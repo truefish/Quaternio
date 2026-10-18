@@ -55,18 +55,18 @@ cd Quaternio-Linux-x86_64-v0.1.0-beta.1
 ./quaternio
 ```
 
-Linux builds default to the OpenGL (FemtoVG) renderer so button presses keep redrawing under Wayland. Drag-and-drop from the file manager works on X11, Windows, and macOS; native Wayland does not deliver file-drop events yet (winit), so use **File → Import** there, or:
+Linux uses OpenGL (FemtoVG) and selects X11/XWayland when `DISPLAY` is available. This enables file-manager drag-and-drop with the bundled window backend. Native Wayland remains available; use **File → Import media** there because this backend does not receive native Wayland file drops.
 
 ```bash
 WINIT_UNIX_BACKEND=x11 ./quaternio
+# To choose native Wayland:
+WINIT_UNIX_BACKEND=wayland ./quaternio
 ```
 
-If OpenGL is unavailable and the UI looks frozen while clicks still “work”, force software rendering or X11:
+If OpenGL is unavailable, use software rendering on X11/XWayland:
 
 ```bash
-SLINT_BACKEND=winit-software ./quaternio
-# or:
-WINIT_UNIX_BACKEND=x11 ./quaternio
+WINIT_UNIX_BACKEND=x11 SLINT_BACKEND=winit-software ./quaternio
 ```
 
 If the app fails to start because a library is missing, install common desktop libraries (Debian/Ubuntu):
@@ -82,7 +82,7 @@ sudo apt install libxcb-shape0 libxcb-xfixes0 libxkbcommon0 libxkbcommon-x11-0 \
 
 ### macOS
 
-This beta ships **Apple Silicon (`arm64`)** builds (`Quaternio-macOS-arm64-v….tar.gz`). Intel macOS downloads are deferred while GitHub’s older Intel runners are unavailable.
+This beta ships **Apple Silicon (`arm64`)** builds (`Quaternio-macOS-arm64-v….tar.gz`). Intel macOS packages are not included in this beta.
 
 1. Download the arm64 archive.
 2. Extract and enter the folder:
@@ -107,6 +107,12 @@ xattr -dr com.apple.quarantine .
 ```
 
 If macOS still blocks it: System Settings → Privacy & Security → allow Quaternio, or in Finder right-click `quaternio` → **Open**.
+
+## Exports
+
+- In **Export**, use **Auto** for hardware encoding with a CPU fallback. **Hardware** requires a working GPU encoder and reports a failure if none is available. macOS uses VideoToolbox; Linux can use VAAPI or NVIDIA; Windows can use NVIDIA, Intel, or AMD.
+
+GPU export needs a compatible driver and FFmpeg encoder. Linux VAAPI also needs the host's `libva` libraries, a GPU driver, and access to `/dev/dri/renderD*`. Picture effects may still run on the CPU. Click an export status message to view or copy the full details.
 
 ## Build from source
 

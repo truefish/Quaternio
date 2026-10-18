@@ -14,14 +14,29 @@ env:
   # BtbN FFmpeg-Builds 8.1 GPL static — pin tag + filename together when upgrading
   FFMPEG_WIN_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-16-13-04/ffmpeg-n8.1.3-18-g46d899d7a0-win64-gpl-8.1.zip
   FFMPEG_LINUX_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-16-13-04/ffmpeg-n8.1.3-18-g46d899d7a0-linux64-gpl-8.1.tar.xz
-  # macOS: OSXExperts (arm64) / evermeet (x86_64) — versioned zips, not "latest"
+  # macOS Apple Silicon: versioned archives.
   FFMPEG_MAC_ARM_FFMPEG_URL: https://www.osxexperts.net/ffmpeg711arm.zip
   FFMPEG_MAC_ARM_FFPROBE_URL: https://www.osxexperts.net/ffprobe711arm.zip
-  FFMPEG_MAC_X64_FFMPEG_URL: https://evermeet.cx/ffmpeg/ffmpeg-9.0.2.zip
-  FFMPEG_MAC_X64_FFPROBE_URL: https://evermeet.cx/ffmpeg/ffprobe-9.0.2.zip
 
 jobs:
+  version:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Match tag to application version
+        run: |
+          python3 - <<'PY'
+          import os, tomllib
+          with open("Cargo.toml", "rb") as source:
+              version = tomllib.load(source)["package"]["version"]
+          expected = "v" + version
+          if os.environ["GITHUB_REF_NAME"] != expected:
+              raise SystemExit(f"Release tag must be {expected}")
+          PY
+
   windows:
+    needs: version
     name: Windows
     runs-on: windows-latest
     steps:
@@ -48,7 +63,7 @@ jobs:
           Copy-Item (Join-Path $bin "ffprobe.exe") packaging/cache/ffprobe.exe
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Stage and package
         shell: pwsh
@@ -71,7 +86,7 @@ jobs:
           ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
           if (-not $makensis) { throw "makensis.exe not found after NSIS install" }
           Push-Location packaging
-          & $makensis quaternio.nsi
+          & $makensis "/DAPP_VERSION=$($tag.TrimStart('v'))" quaternio.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit $LASTEXITCODE" }
           Pop-Location
           # OutFile in quaternio.nsi is ..\dist\Quaternio-Setup.exe
@@ -86,6 +101,7 @@ jobs:
             dist/Quaternio-Setup-*.exe
 
   linux:
+    needs: version
     name: Linux
     runs-on: ubuntu-latest
     steps:
@@ -118,7 +134,7 @@ jobs:
           chmod +x packaging/cache/ffmpeg packaging/cache/ffprobe
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Package tar.gz
         run: |
@@ -140,14 +156,12 @@ jobs:
           path: dist/Quaternio-Linux-x86_64-*.tar.gz
 
   macos:
+    needs: version
     name: macOS (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # macos-14 = Apple Silicon (arm64).
-        # macos-13 was retired by GitHub (queues forever with no runner).
-        # Intel (x86_64) via macos-15-intel is deferred for a later beta.
         os: [macos-14]
     steps:
       - name: Checkout
@@ -160,13 +174,9 @@ jobs:
         run: |
           ARCH="$(uname -m)"
           mkdir -p packaging/cache
-          if [ "$ARCH" = "arm64" ]; then
-            curl -L --fail --retry 3 -o packaging/cache/ffmpeg.zip "$FFMPEG_MAC_ARM_FFMPEG_URL"
-            curl -L --fail --retry 3 -o packaging/cache/ffprobe.zip "$FFMPEG_MAC_ARM_FFPROBE_URL"
-          else
-            curl -L --fail --retry 3 -o packaging/cache/ffmpeg.zip "$FFMPEG_MAC_X64_FFMPEG_URL"
-            curl -L --fail --retry 3 -o packaging/cache/ffprobe.zip "$FFMPEG_MAC_X64_FFPROBE_URL"
-          fi
+          test "$ARCH" = "arm64"
+          curl -L --fail --retry 3 -o packaging/cache/ffmpeg.zip "$FFMPEG_MAC_ARM_FFMPEG_URL"
+          curl -L --fail --retry 3 -o packaging/cache/ffprobe.zip "$FFMPEG_MAC_ARM_FFPROBE_URL"
           unzip -o packaging/cache/ffmpeg.zip -d packaging/cache/ffmpeg-extract
           unzip -o packaging/cache/ffprobe.zip -d packaging/cache/ffprobe-extract
           FFMPEG_BIN=$(find packaging/cache/ffmpeg-extract -type f -name ffmpeg | head -n1)
@@ -179,7 +189,7 @@ jobs:
           codesign -s - packaging/cache/ffmpeg packaging/cache/ffprobe || true
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Package unsigned tar.gz
         run: |

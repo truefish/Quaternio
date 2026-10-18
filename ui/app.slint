@@ -274,8 +274,14 @@ component SecBtn inherits Rectangle {
     in property <bool> dropdown: false;
     in property <bool> expanded: false;
     callback clicked();
+    forward-focus: action-focus;
+    action-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => { if (event.text == Key.Return || event.text == " ") { return accept; } return reject; }
+        key-released(event) => { if (event.text == Key.Return || event.text == " ") { root.clicked(); return accept; } return reject; }
+    }
     horizontal-stretch: 0; height: 28px; border-radius: 4px;
-    border-width: 1px; border-color: Palette.bg3;
+    border-width: 1px; border-color: action-focus.has-focus ? Palette.accent : Palette.bg3;
     background: !root.enabled ? Palette.bg2 : touch.show-pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
     touch := LiveTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if (root.enabled) { root.clicked(); } } }
     HorizontalLayout { padding-left: 10px; padding-right: 10px; spacing: 6px; alignment: start;
@@ -290,7 +296,13 @@ component PriBtn inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
     callback clicked();
-    horizontal-stretch: 0; height: 28px; border-radius: 4px; border-width: 0px;
+    forward-focus: action-focus;
+    action-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => { if (event.text == Key.Return || event.text == " ") { return accept; } return reject; }
+        key-released(event) => { if (event.text == Key.Return || event.text == " ") { root.clicked(); return accept; } return reject; }
+    }
+    horizontal-stretch: 0; height: 28px; border-radius: 4px; border-width: action-focus.has-focus ? 1px : 0px; border-color: Palette.accent;
     background: !root.enabled ? Palette.bg3 : touch.show-pressed ? Palette.accent-action-pressed : touch.has-hover ? Palette.accent-action-hover : Palette.accent-action;
     touch := LiveTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if (root.enabled) { root.clicked(); } } }
     HorizontalLayout { padding-left: 10px; padding-right: 10px; alignment: start;
@@ -305,6 +317,13 @@ component TextBtn inherits Rectangle {
     in property <bool> dropdown: false;
     in property <bool> expanded: false;
     callback clicked();
+    forward-focus: action-focus;
+    action-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => { if (event.text == Key.Return || event.text == " ") { return accept; } return reject; }
+        key-released(event) => { if (event.text == Key.Return || event.text == " ") { root.clicked(); return accept; } return reject; }
+    }
+    border-width: action-focus.has-focus ? 1px : 0px; border-color: Palette.accent;
     horizontal-stretch: 0; height: 26px; border-radius: 4px;
     background: !root.enabled ? Palette.bg2 : touch.show-pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
     touch := LiveTouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { if (root.enabled) { root.clicked(); } }
@@ -491,11 +510,12 @@ component TcRun inherits HorizontalLayout {
     in property <[Glyph]> cells;
     in property <bool> main: false;
     in property <color> ink: Palette.text-primary;
+    height: root.main ? 24px : 16px;
     spacing: 0; alignment: start;
     for g in root.cells: Text {
         text: g.ch;
-        width: g.sep ? (root.main ? 6px : 4px) : (root.main ? 11px : 7px);
-        height: root.main ? 22px : 14px;
+        width: g.sep ? (root.main ? 6px : 4px) : (root.main ? 13px : 8px);
+        height: root.main ? 24px : 16px;
         font-size: root.main ? 18px : 11px;
         font-weight: 500;
         color: root.ink;
@@ -956,6 +976,7 @@ component MediaBin inherits Rectangle {
     in-out property <length> filter-popup-x: 0px;
     in-out property <length> filter-popup-y: 0px;
     property <bool> wide-bin: root.width >= 520px;
+    property <bool> show-folders: false;
     callback command(string);
     callback pick(string, int);
     callback focus-editor();
@@ -966,14 +987,14 @@ component MediaBin inherits Rectangle {
             PaneDragHeader { draggable: root.dockable; pane: 2; activated => { root.activated(); root.bin-tab = 0; root.focus-editor(); } dock-panel(x, y) => { root.dock-panel(x, y); } }
             Rectangle { x: 0px; y: 30px; width: 100%; height: 2px; background: root.active ? Palette.accent : transparent; }
             HorizontalLayout { padding-left: 8px; padding-right: 4px; spacing: 2px;
-                Text { text: "Project" + (root.selected-count > 1 ? " · " + root.selected-count : ""); color: root.bin-tab == 0 ? Palette.text-primary : Palette.text-secondary; font-size: 12px; font-weight: 600; horizontal-alignment: left; vertical-alignment: center; }
+                TextBtn { label: "Media" + (root.selected-count > 1 ? " · " + root.selected-count : ""); tooltip: "Project media"; background: root.bin-tab == 0 ? Palette.accent-muted : transparent; clicked => { root.activated(); root.bin-tab = 0; } }
                 Rectangle { width: 4px; }
                 WsTab { label: "Transitions"; on: root.bin-tab == 1; clicked => { root.activated(); root.bin-tab = 1; root.icon-view = false; } }
                 Rectangle { horizontal-stretch: 1; }
-                TextBtn { label: "Import"; clicked => { root.activated(); root.command("import"); } }
+                TextBtn { label: "Import…"; tooltip: "Add video, audio or images"; clicked => { root.activated(); root.command("import"); } }
             }
         }
-        if root.bin-tab == 0: Rectangle { height: 34px; background: Palette.bg1;
+        if root.bin-tab == 0 && root.show-folders: Rectangle { height: 34px; background: Palette.bg1;
             ProjectOrganizer { x: 8px; y: 2px; width: parent.width - 16px; window-width: PopupBounds.width; window-height: PopupBounds.height;
                 bins: root.bins; current-bin: root.current-bin; selected-media: root.selected-count > 0;
                 create-bin(name) => { root.activated(); root.create-bin(name); root.focus-editor(); }
@@ -985,12 +1006,13 @@ component MediaBin inherits Rectangle {
             HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 4px;
                 Field { focused => { root.activated(); } placeholder: "Search media…"; value <=> root.query; horizontal-stretch: 1; min-width: 0px; }
                 if root.query != "": TextBtn { label: "×"; tooltip: "Clear search"; clicked => { root.activated(); root.query = ""; } }
+                TextBtn { label: "Bins"; tooltip: "Show folders and organize selected media"; background: root.show-folders ? Palette.accent-muted : transparent; clicked => { root.show-folders = !root.show-folders; } }
                 IconBtn { tooltip: "List view"; icon: @image-url("icons/list.svg"); armed: !root.icon-view; clicked => { root.activated(); root.icon-view = false; } }
                 IconBtn { tooltip: "Thumbnail view"; icon: @image-url("icons/grid.svg"); armed: root.icon-view; clicked => { root.activated(); root.icon-view = true; } }
                 ChoiceButton { width: 28px; tooltip: "Filter media by type"; icon: @image-url("icons/filter.svg"); choices: [{text: "All media"}, {text: "Video"}, {text: "Audio"}, {text: "Still"}]; selected: root.bin-filter; armed: root.bin-filter != 0; chosen(index) => { root.activated(); root.bin-filter = index; root.command("filter"); } }
             }
         }
-        if root.bin-tab == 0 && !root.icon-view: Rectangle { height: 26px; background: Palette.bg2; border-radius: 0px;
+        if root.bin-tab == 0 && root.has-media && !root.icon-view: Rectangle { height: 26px; background: Palette.bg2; border-radius: 0px;
             Rectangle { y: 25px; height: 1px; width: 100%; background: Palette.bg3; }
             HorizontalLayout { width: parent.width; padding-left: 8px; padding-right: 8px; spacing: 8px;
                 Rectangle { width: 8px; }
@@ -1004,7 +1026,7 @@ component MediaBin inherits Rectangle {
         Rectangle { vertical-stretch: 1; min-height: 110px; clip: true;
             if root.bin-tab == 0 && !root.has-media: VerticalLayout { padding: 16px; spacing: 8px; alignment: center;
                 Text { text: root.query == "" && root.bin-filter == 0 ? "Your media starts here" : "No matching media"; color: Palette.text-primary; font-size: 13px; font-weight: 600; horizontal-alignment: center; wrap: word-wrap; }
-                Text { text: root.query == "" && root.bin-filter == 0 ? "Import video, audio or images to begin." : "Try another search or media filter."; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
+                Text { text: root.query == "" && root.bin-filter == 0 ? "Drop files here or choose Import media." : "Try another search or media filter."; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
                 HorizontalLayout { alignment: center;
                     SecBtn { label: root.query == "" && root.bin-filter == 0 ? "Import media" : "Show all media"; clicked => { root.activated(); if (root.query == "" && root.bin-filter == 0) { root.command("import"); } else { root.query = ""; root.bin-filter = 0; root.command("filter"); } } }
                 }
@@ -1012,7 +1034,11 @@ component MediaBin inherits Rectangle {
             }
             if root.bin-tab == 0 && root.has-media && !root.icon-view: Flickable {
                 width: 100%; height: 100%;
-                VerticalLayout { alignment: start; spacing: 0;
+                // Dragging a media row inserts it; wheel/trackpad gestures scroll.
+                interactive: false;
+                viewport-width: self.width;
+                viewport-height: max(self.height, media-list.preferred-height);
+                media-list := VerticalLayout { width: parent.width; alignment: start; spacing: 0;
                     for item in root.bin-items: Rectangle {
                         height: (root.bin-filter == 0 || (root.bin-filter == 1 && item.kind == "V") || (root.bin-filter == 2 && item.kind == "A") || (root.bin-filter == 3 && item.kind == "S")) ? (root.width >= 340px ? 30px : 44px) : 0px;
                         background: item.selected ? Palette.accent-muted : bin-row.has-hover ? Palette.bg3 : Palette.bg1;
@@ -1036,7 +1062,10 @@ component MediaBin inherits Rectangle {
             }
             if root.bin-tab == 0 && root.has-media && root.icon-view: Flickable {
                 width: 100%; height: 100%;
-                VerticalLayout { alignment: start; padding: 8px; spacing: 8px;
+                interactive: false;
+                viewport-width: self.width;
+                viewport-height: max(self.height, media-cards.preferred-height);
+                media-cards := VerticalLayout { width: parent.width; alignment: start; padding: 8px; spacing: 8px;
                     for item in root.bin-items: Rectangle {
                         height: (root.bin-filter == 0 || (root.bin-filter == 1 && item.kind == "V") || (root.bin-filter == 2 && item.kind == "A") || (root.bin-filter == 3 && item.kind == "S")) ? 76px : 0px; border-radius: 4px; clip: true; background: item.selected ? Palette.accent-muted : icon-row.has-hover ? Palette.bg3 : Palette.bg2;
                         icon-row := MediaDragArea { media-id: item.id; media-drag(id, phase, x, y) => { root.media-drag(id, phase, x, y); } selected(ctrl, shift) => { root.activated(); root.select-media(item.id, ctrl, shift); root.focus-editor(); } }
@@ -1208,13 +1237,13 @@ export component AppWindow inherits Window {
     title: root.window-title + (root.live-preview ? " · Live" : "");
     icon: @image-url("icons/quaternio.svg");
     in-out property <string> window-title: "Quaternio";
-    preferred-width: 1920px;
-    preferred-height: 1080px;
-    min-width: 1180px;
+    preferred-width: 1440px;
+    preferred-height: 900px;
+    min-width: 1120px;
     min-height: 720px;
     background: Palette.bg0;
     default-font-family: "Inter";
-    default-font-size: 11px;
+    default-font-size: 12px;
     default-font-weight: 400;
     forward-focus: keys;
 
@@ -1248,6 +1277,9 @@ export component AppWindow inherits Window {
     callback timecode-begin(bool);
     callback timecode-seek(bool, string) -> bool;
     in property <string> status-text: "Ready";
+    in property <bool> import-busy: false;
+    in property <float> import-progress: 0;
+    in property <string> import-status: "";
     out property <bool> live-input-active: LiveFocus.active;
     in property <bool> live-preview: false;
     in property <bool> live-reloading: false;
@@ -1322,7 +1354,7 @@ export component AppWindow inherits Window {
     in property <float> source-out-position: 1;
     in property <bool> source-range-on: false;
     in property <string> source-range-label: "Select media to preview and mark a range.";
-    in property <string> source-placeholder: "Select media in the Project bin to preview, scrub, and mark In/Out.";
+    in property <string> source-placeholder: "Select a file in Media to preview it and mark In/Out.";
     in-out property <float> source-px-width: 340;
     in-out property <float> source-px-height: 240;
     in property <[Glyph]> bar-tc;
@@ -1497,6 +1529,12 @@ export component AppWindow inherits Window {
     in-out property <bool> show-import-report: false;
     in-out property <string> import-report-text: "";
     in property <bool> file-drop-hover: false;
+    in-out property <bool> show-export-details: false;
+    property <string> export-details: "";
+    out property <bool> modal-open: root.show-dialog || root.show-prefs || root.show-about
+        || root.show-import-mode || root.show-import-report || root.show-update-agree
+        || root.show-sequence-match || root.capturing-binding || root.show-export-details;
+    changed modal-open => { if (root.modal-open) { root.open-menu = 0; ToolHints.shown = false; } }
     in property <bool> update-available: false;
     in property <string> update-tooltip: "";
     in-out property <bool> show-update-agree: false;
@@ -1669,6 +1707,7 @@ export component AppWindow inherits Window {
         changed has-focus => { if (self.has-focus) { KeyboardControls.navigating = false; } }
         key-pressed(event) => {
             if (root.live-reloading) { return accept; }
+            if (root.modal-open && event.text != Key.Escape) { return reject; }
             if (KeyboardControls.navigating && (event.text == Key.Tab || event.text == Key.Backtab)) { return reject; }
             if (KeyboardControls.navigating && event.text == Key.Escape) { KeyboardControls.navigating = false; keys.focus(); return accept; }
             if (event.text == Key.Escape && PaneDocking.active) { PaneDocking.active = false; PaneDocking.cancelled = true; return accept; }
@@ -1706,11 +1745,13 @@ export component AppWindow inherits Window {
                         Rectangle { y: 8px; width: 1px; height: 12px; background: Palette.bg3; }
                     }
                     Rectangle { width: 8px; }
-                    Text { text: root.project-name; color: Palette.text-primary; font-size: 11px; font-weight: 500; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
+                    Text { text: root.project-name; color: Palette.text-primary; font-size: 12px; font-weight: 500; horizontal-stretch: 1; min-width: 0px; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
                     Rectangle { width: 8px; }
                     Text { text: root.save-label; color: Palette.text-secondary; font-size: 11px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
-                    TextBtn { label: "Commands"; tooltip: "Search commands · " + root.shortcut-hint("commands", root.shortcut-revision); clicked => { root.command-query = ""; root.show-command-palette = true; } }
+                    TextBtn { label: "Import…"; tooltip: "Add media · " + root.shortcut-hint("import", root.shortcut-revision); clicked => { root.command("import"); } }
+                    TextBtn { label: "Save"; tooltip: "Save project · " + root.shortcut-hint("save", root.shortcut-revision); clicked => { root.command("save"); } }
+                    IconBtn { icon: @image-url("icons/search.svg"); tooltip: "Search commands · " + root.shortcut-hint("commands", root.shortcut-revision); clicked => { root.command-query = ""; root.show-command-palette = true; } }
                     Rectangle { width: 8px; }
                     if root.update-available: IconBtn {
                         retain-keyboard-focus: false;
@@ -1992,7 +2033,7 @@ export component AppWindow inherits Window {
                                     Rectangle {
                                         x: 2px; width: 4px; background: Palette.bg3;
                                         height: insp-scroll.viewport-height <= insp-scroll.height ? parent.height : max(24px, parent.height * insp-scroll.height / insp-scroll.viewport-height);
-                                        y: insp-scroll.viewport-height <= insp-scroll.height ? 0px : (parent.height - self.height) * insp-scroll.viewport-y / (insp-scroll.viewport-height - insp-scroll.height);
+                                        y: insp-scroll.viewport-height <= insp-scroll.height ? 0px : (parent.height - self.height) * -insp-scroll.viewport-y / (insp-scroll.viewport-height - insp-scroll.height);
                                     }
                                 }
                             }
@@ -2128,7 +2169,7 @@ Rectangle { height: 20px; background: Palette.bg0; clip: true;
                                     Rectangle { horizontal-stretch: 1; background: Palette.bg1; clip: true;
 
 for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; height: max(lane.h * 1px, 28px); width: 100%; background: lane.video ? #242426 : #202522; Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: #343438; } }
-                                if !root.has-clips: Text { text: root.hint-insert == "Unassigned" ? "Select media in the Project bin, then click Insert." : "Select media in the Project bin, then Insert (" + root.hint-insert + ")."; x: 16px; y: parent.height * 0.35; width: parent.width - 32px; height: 48px; wrap: word-wrap; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                                if !root.has-clips: Text { text: "Drag media onto a track to start editing."; x: 16px; y: parent.height * 0.35; width: parent.width - 32px; height: 48px; wrap: word-wrap; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                                         for clip in root.clips: Rectangle {
                                             x: clip.x * 1px; y: (clip.y - root.timeline-scroll-y) * 1px + 2px; width: max(clip.w * 1px, 2px); height: max(clip.h * 1px - 4px, 8px); border-radius: 0px;
                                             background: clip.still ? (clip.selected ? Palette.clip-still-on : Palette.clip-still) : clip.video ? (clip.selected ? Palette.clip-video-on : Palette.clip-video) : (clip.selected ? Palette.clip-audio-on : Palette.clip-audio);
@@ -2245,7 +2286,7 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                                             VerticalLayout { padding: 8px; spacing: 3px;
                                                 Text { text: job.name; color: Palette.text-primary; font-weight: 600; font-size: 12px; overflow: elide; height: 18px; }
                                                 Text { text: job.output; color: Palette.text-secondary; font-size: 11px; overflow: elide; height: 18px; }
-                                                Text { text: job.status; color: job.complete ? Palette.status-ok : Palette.text-secondary; font-size: 11px; overflow: elide; height: 18px; }
+                                                TextBtn { label: job.status; tooltip: "View full export details"; height: 22px; horizontal-stretch: 1; min-width: 0px; clicked => { root.export-details = job.status; root.show-export-details = true; } }
                                                 HorizontalLayout { alignment: start; spacing: 8px;
                                                     if job.retryable: TextBtn { label: "Retry"; clicked => { root.pick("queue-retry", job.id); } }
                                                     TextBtn { label: "Remove"; enabled: job.removable; clicked => { root.pick("queue-remove", job.id); } }
@@ -2375,14 +2416,16 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                                 if root.export-busy: Text { x: parent.width - self.width; width: root.export-preparing ? 85px : 38px; height: 100%; text: (root.export-preparing ? root.export-preparation-label + " " : "") + root.export-percent + "%"; color: Palette.text-primary; font-size: 11px; horizontal-alignment: right; vertical-alignment: center; }
                                 LiveTouchArea {
                                     property <string> shown-message: "";
+                                    mouse-cursor: pointer;
+                                    clicked => { root.export-details = root.export-message; root.show-export-details = true; }
                                     changed has-hover => {
                                         if (self.has-hover && root.export-message != "") {
                                             self.shown-message = root.export-message;
-                                            ToolHints.text = self.shown-message;
+                                            ToolHints.text = "Click to view export details\n" + self.shown-message;
                                             ToolHints.x = self.absolute-position.x + self.width / 2;
                                             ToolHints.y = self.absolute-position.y + self.height + 5px;
                                             ToolHints.shown = true;
-                                        } else if (ToolHints.text == self.shown-message) { ToolHints.shown = false; }
+                                        } else if (ToolHints.text == "Click to view export details\n" + self.shown-message) { ToolHints.shown = false; }
                                     }
                                 }
                             }
@@ -2401,8 +2444,8 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                 Rectangle { height: 1px; width: 100%; background: Palette.bg3; }
                 HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 12px;
                     Text { text: root.sequence-label; color: Palette.text-primary; font-size: 11px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; }
-                    Text { text: root.playback-label; color: Palette.text-secondary; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
-                    Rectangle { width: root.preview-cache-status == "" ? 90px : 170px;
+                    if root.show-status-extra && !root.import-busy: Text { text: root.playback-label; color: Palette.text-secondary; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
+                    if !root.import-busy: Rectangle { width: root.preview-cache-status == "" ? 90px : 170px;
                         Text { width: parent.width - (root.preview-cache-status != "" && root.preview-cache-auto ? 62px : 0px); height: 100%; text: root.preview-cache-status == "" ? root.cache-label : root.preview-cache-label; color: Palette.text-secondary; font-size: 11px; vertical-alignment: center; overflow: elide; }
                         LiveTouchArea {
                             property <string> shown-message: "";
@@ -2415,17 +2458,18 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                         }
                         if root.preview-cache-status != "" && root.preview-cache-auto: TextBtn { x: parent.width - 60px; y: 1px; width: 60px; height: 20px; label: root.preview-cache-paused ? "Resume" : "Pause"; tooltip: root.preview-cache-paused ? "Resume background preview preparation" : "Pause background preview preparation"; clicked => { root.preview-cache-paused = !root.preview-cache-paused; root.preview-cache-settings(); } }
                     }
-                    Text { text: root.status-text; color: Palette.text-primary; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
-                    if root.show-status-extra: Text { text: root.footer-scratch; color: Palette.text-secondary; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
-                    if root.show-status-extra: Text { text: "FFmpeg"; color: Palette.text-secondary; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
-                    Rectangle { horizontal-stretch: 1; }
+                    Text { text: root.import-busy ? root.import-status : root.status-text; color: Palette.text-primary; font-size: 11px; min-width: 0px; horizontal-stretch: 1; horizontal-alignment: left; vertical-alignment: center; overflow: elide; }
+                    if root.import-busy: Rectangle { width: 90px; height: 4px; border-radius: 2px; background: Palette.bg3;
+                        Rectangle { width: parent.width * max(0, min(1, root.import-progress)); height: 100%; border-radius: 2px; background: Palette.accent; }
+                    }
+                    if root.import-busy: TextBtn { label: "Cancel import"; height: 20px; clicked => { root.command("import-cancel"); } }
                     if root.live-preview: Text {
                         text: root.live-status == "" ? "Live" : root.live-status;
                         color: root.live-update-blocked ? Palette.status-warning : root.live-update-pending ? Palette.accent : Palette.text-secondary;
                         font-size: 11px; width: min(360px, root.width * 0.27);
                         horizontal-alignment: right; vertical-alignment: center; overflow: elide;
                     }
-                    Text { text: "0.1.0"; color: Palette.text-disabled; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
+                    Text { text: root.app-version; color: Palette.text-disabled; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
                 }
             }
         }
@@ -2625,16 +2669,16 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
             }
         }
 
-        if root.file-drop-hover && !root.media-drag-active: Rectangle {
+        if root.file-drop-hover && !root.media-drag-active && !root.modal-open: Rectangle {
             width: 100%; height: 100%; z: 3; background: #00000066;
             VerticalLayout { alignment: center; spacing: 8px;
                 Text { text: "Drop to import"; color: Palette.text-primary; font-size: 18px; font-weight: 600; horizontal-alignment: center; }
-                Text { text: "Media files add to the Project bin. Premiere / Resolve / FCPXML open the timeline import dialog."; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
+                Text { text: "Add video, audio, images or folders to your media bin."; color: Palette.text-secondary; font-size: 12px; horizontal-alignment: center; wrap: word-wrap; }
             }
         }
         if root.show-dialog || root.show-prefs || root.show-about || root.show-import-mode || root.show-import-report || root.show-update-agree: Rectangle { width: 100%; height: 100%; z: 4; background: #00000088; LiveTouchArea { } }
         if root.show-update-agree: Rectangle {
-            x: (parent.width - 440px) / 2; y: (parent.height - self.height) / 2; z: 5; width: 440px; height: 220px;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; z: 9; width: min(560px, parent.width - 48px); height: 260px;
             background: Palette.bg1; border-width: 1px; border-color: Palette.bg3; border-radius: 4px;
             VerticalLayout { padding: 16px; spacing: 12px;
                 Text { text: root.update-agree-title; color: Palette.text-primary; font-size: 15px; font-weight: 600; }
@@ -2646,13 +2690,30 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                 }
             }
         }
+        if root.show-update-agree: Rectangle { width: 100%; height: 100%; z: 8; background: #00000088; LiveTouchArea { } }
+        if root.show-export-details: Rectangle { width: 100%; height: 100%; z: 8; background: #00000088; LiveTouchArea { } }
+        if root.show-export-details: Rectangle {
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            width: min(680px, parent.width - 64px); height: min(440px, parent.height - 96px); z: 9;
+            background: Palette.bg1; border-width: 1px; border-color: Palette.bg3; border-radius: 4px;
+            VerticalLayout { padding: 20px; spacing: 16px;
+                Text { text: "Export details"; color: Palette.text-primary; font-size: 16px; font-weight: 600; }
+                Flickable { vertical-stretch: 1; interactive: false; viewport-width: self.width; viewport-height: max(self.height, export-detail-text.preferred-height);
+                    export-detail-text := TextInput { width: parent.width; height: self.preferred-height; text: root.export-details; color: Palette.text-primary; font-size: 12px; wrap: word-wrap; read-only: true; single-line: false; selection-background-color: Palette.accent-muted; selection-foreground-color: Palette.text-primary; }
+                }
+                HorizontalLayout { alignment: end; spacing: 8px;
+                    SecBtn { label: "Copy details"; clicked => { export-detail-text.select-all(); export-detail-text.copy(); } }
+                    SecBtn { label: "Close"; clicked => { root.show-export-details = false; keys.focus(); } }
+                }
+            }
+        }
         if root.show-import-mode: Rectangle {
             x: (parent.width - 440px) / 2; y: (parent.height - self.height) / 2; z: 5; width: 440px; height: 220px;
             background: Palette.bg1; border-width: 1px; border-color: Palette.bg3; border-radius: 4px;
             VerticalLayout { padding: 16px; spacing: 12px;
                 Text { text: "Import timeline"; color: Palette.text-primary; font-size: 15px; font-weight: 600; }
-                Text { text: "How should Quaternio apply this Premiere / Resolve export?"; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
-                Text { text: "Import .prproj, .drp, or an FCPXML export. Native project support is best-effort when you cannot open Premiere or Resolve."; color: Palette.text-secondary; font-size: 11px; wrap: word-wrap; }
+                Text { text: "Open this timeline as a new project, or add it at the playhead?"; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                Text { text: "Import an FCPXML timeline. Direct .prproj and .drp import is not available yet."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
                 HorizontalLayout { alignment: end; spacing: 8px;
                     SecBtn { label: "Cancel"; clicked => { root.command("import-timeline-cancel"); keys.focus(); } }
                     SecBtn { label: "Add to current"; clicked => { root.command("import-timeline-merge"); keys.focus(); } }

@@ -13,45 +13,22 @@ export global LiveFocus {
     }
 }
 
-// A stationary held pointer remains an interaction even without move events.
-// On Wayland + software renderer, pointer-up can be delayed or dropped; keep a
-// short stuck-press watchdog so LiveFocus / button chrome recover quickly.
+// Keep a stationary drag active until release. A timer must not turn a real
+// long press into a release; destroyed controls expire through the focus lease.
 export component LiveTouchArea inherits TouchArea {
-    // Prefer this for button backgrounds — clears even when TouchArea.pressed sticks.
-    out property <bool> show-pressed: root.pressed && !root.force-cleared;
+    out property <bool> show-pressed: root.pressed;
     property <bool> live-press-counted: false;
-    property <int> stuck-ticks: 0;
-    property <bool> force-cleared: false;
     changed pressed => {
         if (self.pressed != self.live-press-counted) {
             self.live-press-counted = self.pressed;
-            self.stuck-ticks = 0;
             if (self.pressed) {
-                self.force-cleared = false;
                 LiveFocus.input-gained();
             } else {
-                self.force-cleared = false;
                 LiveFocus.input-lost();
             }
         }
     }
-    pointer-event(event) => {
-        if (event.kind == PointerEventKind.cancel && root.live-press-counted) {
-            root.live-press-counted = false;
-            root.stuck-ticks = 0;
-            root.force-cleared = true;
-            LiveFocus.input-lost();
-        }
-    }
-    // ~1.2s stuck watchdog (8 × 150ms). Longer holds keep the lease via heartbeat.
-    Timer { interval: 150ms; running: root.pressed && !root.force-cleared; triggered => {
+    Timer { interval: 150ms; running: root.pressed; triggered => {
         LiveFocus.heartbeat();
-        root.stuck-ticks += 1;
-        if (root.stuck-ticks >= 8) {
-            root.live-press-counted = false;
-            root.stuck-ticks = 0;
-            root.force-cleared = true;
-            LiveFocus.input-lost();
-        }
     } }
 }

@@ -3,7 +3,7 @@ resolver = "2"
 
 [package]
 name = "quaternio"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 edition = "2021"
 description = "Quaternio, a native desktop editor for media, cut, grade, and export."
 license = "MIT"
@@ -24,7 +24,7 @@ roxmltree = "0.21.1"
 ureq = { version = "2.12", default-features = false, features = ["tls", "json"] }
 semver = "1"
 open = "5"
-zip = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
 

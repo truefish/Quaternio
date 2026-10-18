@@ -1,4 +1,14 @@
 fn main() {
+    // The generated desktop UI can exceed the Windows main-thread stack in
+    // debug builds. RUST_MIN_STACK only affects newly spawned Rust threads.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let stack = if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            "/STACK:16777216"
+        } else {
+            "-Wl,--stack,16777216"
+        };
+        println!("cargo:rustc-link-arg-bin=quaternio={stack}");
+    }
     // Windows build-script threads have a small default stack. Compiling the
     // docked editor's nested Slint components needs a larger local compiler stack.
     std::thread::Builder::new()

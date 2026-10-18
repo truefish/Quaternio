@@ -1,0 +1,37 @@
+name: Build check
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libfontconfig-dev libx11-xcb-dev libxcursor-dev \
+            libxkbcommon-x11-dev libx11-dev libwayland-dev libasound2-dev \
+            libegl1-mesa-dev libgl1-mesa-dev
+      - name: Check application and UI
+        run: cargo check --locked

@@ -22,7 +22,6 @@ mod update;
 mod app;
 
 fn main() {
-    prefer_responsive_linux_backend();
     match cli::run_if_requested() {
         Ok(true) => return,
         Ok(false) => {}
@@ -31,22 +30,49 @@ fn main() {
             std::process::exit(1);
         }
     }
+    if let Err(error) = configure_linux_backend() {
+        eprintln!("Quaternio: {error}");
+        std::process::exit(1);
+    }
     if let Err(err) = app::run() {
         eprintln!("Quaternio: {err:#}");
         std::process::exit(1);
     }
 }
 
-/// Wayland + software renderer can stop repainting (Slint #7663): clicks land but
-/// button chrome never redraws. Prefer FemtoVG unless the user already chose a backend.
-fn prefer_responsive_linux_backend() {
+fn configure_linux_backend() -> Result<(), slint::PlatformError> {
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os("SLINT_BACKEND").is_none() {
-            // SAFETY: called once before the Slint/winit event loop starts.
-            unsafe {
-                std::env::set_var("SLINT_BACKEND", "winit-femtovg");
-            }
+        use i_slint_backend_winit::{winit, Backend};
+        use winit::platform::wayland::EventLoopBuilderExtWayland;
+        use winit::platform::x11::EventLoopBuilderExtX11;
+
+        // winit 0.30 no longer reads WINIT_UNIX_BACKEND. Honor it explicitly;
+        // prefer XWayland where available because native Wayland lacks file drops.
+        let requested = std::env::var("WINIT_UNIX_BACKEND").unwrap_or_default();
+        let display = std::env::var_os("DISPLAY").is_some_and(|s| !s.is_empty());
+        let mut events = winit::event_loop::EventLoop::with_user_event();
+        match requested.as_str() {
+            "x11" => { events.with_x11(); }
+            "wayland" => { events.with_wayland(); }
+            "" if display => { events.with_x11(); }
+            "" => {}
+            other => return Err(format!("Unknown WINIT_UNIX_BACKEND '{other}'; use x11 or wayland").into()),
         }
+
+        let renderer = std::env::var("SLINT_BACKEND").unwrap_or_else(|_| "winit-femtovg".into());
+        let renderer = renderer.strip_prefix("winit-").unwrap_or(&renderer);
+        let renderer = match renderer {
+            "winit" | "gl" | "femtovg" => "femtovg",
+            "sw" | "software" => "software",
+            other => return Err(format!("Unsupported SLINT_BACKEND '{other}'; use winit-femtovg or winit-software").into()),
+        };
+        let backend = Backend::builder()
+            .with_event_loop_builder(events)
+            .with_renderer_name(renderer)
+            .build()?;
+        slint::platform::set_platform(Box::new(backend))
+            .map_err(slint::PlatformError::SetPlatformError)?;
     }
+    Ok(())
 }

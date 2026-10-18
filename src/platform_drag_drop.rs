@@ -14,7 +14,7 @@ const MAX_PENDING_PALETTE_KEYS: usize = 256;
 struct DropMailbox {
     paths: VecDeque<PathBuf>,
     overflow_count: usize,
-    hover_count: usize,
+    hovering: bool,
     palette_active: bool,
     palette_keys: VecDeque<&'static str>,
 }
@@ -23,7 +23,7 @@ struct DropMailbox {
 ///
 /// Note: winit 0.30 emits `DroppedFile` / `HoveredFile` on Windows, macOS, and
 /// X11. Native Wayland does not deliver those events yet — use Import or run
-/// with `WINIT_UNIX_BACKEND=x11` for drag-and-drop on Wayland desktops.
+/// through XWayland (the default when DISPLAY is available).
 #[derive(Clone)]
 pub struct FileDropQueue {
     mailbox: Rc<RefCell<DropMailbox>>,
@@ -39,13 +39,13 @@ impl FileDropQueue {
                 let mut mailbox = mailbox.borrow_mut();
                 match event {
                     WindowEvent::HoveredFile(_) => {
-                        mailbox.hover_count = mailbox.hover_count.saturating_add(1);
+                        mailbox.hovering = true;
                     }
-                    WindowEvent::HoveredFileCancelled => {
-                        mailbox.hover_count = 0;
+                    WindowEvent::HoveredFileCancelled | WindowEvent::Focused(false) => {
+                        mailbox.hovering = false;
                     }
                     WindowEvent::DroppedFile(path) => {
-                        mailbox.hover_count = 0;
+                        mailbox.hovering = false;
                         if !mailbox.paths.iter().any(|pending| pending == path) {
                             if mailbox.paths.len() < MAX_PENDING_FILES {
                                 mailbox.paths.push_back(path.clone());
@@ -91,7 +91,7 @@ impl FileDropQueue {
     }
 
     pub fn is_hovering_files(&self) -> bool {
-        self.mailbox.borrow().hover_count > 0
+        self.mailbox.borrow().hovering
     }
 
     /// Set immediately when the palette opens or closes, before keyboard dispatch.

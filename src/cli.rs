@@ -184,7 +184,7 @@ fn render(request: &Request, project: &Project, report: &mut RenderReport) -> Re
                 summary.route = Some("composite".into());
             }
             if !lower.starts_with("checking ") {
-                for label in ["NVIDIA H.264", "Intel H.264", "AMD H.264", "CPU H.264"] {
+                for label in ["NVIDIA H.264", "Intel H.264", "AMD H.264", "Apple VideoToolbox H.264", "VAAPI H.264", "CPU H.264"] {
                     if progress.message.contains(label) {
                         summary.encoder = Some(label.into());
                     }

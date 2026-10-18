@@ -1,5 +1,8 @@
 Unicode True
 !include "MUI2.nsh"
+!ifndef APP_VERSION
+  !define APP_VERSION "development"
+!endif
 
 Name "Quaternio"
 OutFile "..\dist\Quaternio-Setup.exe"
@@ -27,7 +30,7 @@ Section "Quaternio"
 
   WriteRegStr HKCU "Software\Quaternio" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Quaternio" "DisplayName" "Quaternio"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Quaternio" "DisplayVersion" "0.1.0-beta.1"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Quaternio" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Quaternio" "Publisher" "Quaternio"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Quaternio" "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Quaternio" "InstallLocation" "$INSTDIR"

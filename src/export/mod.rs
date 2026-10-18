@@ -184,24 +184,59 @@ pub struct ExportProgress {
     pub done: bool,
     pub error: Option<String> }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum VideoEncoder {
     Cpu,
     Nvenc,
     Qsv,
-    Amf }
+    Amf,
+    VideoToolbox,
+    Vaapi(PathBuf) }
 
 impl VideoEncoder {
-    fn label(self) -> &'static str {
+    fn label(&self) -> &'static str {
         match self {
             Self::Cpu => "CPU H.264",
             Self::Nvenc => "NVIDIA H.264",
             Self::Qsv => "Intel H.264",
-            Self::Amf => "AMD H.264" }
+            Self::Amf => "AMD H.264",
+            Self::VideoToolbox => "Apple VideoToolbox H.264",
+            Self::Vaapi(_) => "VAAPI H.264" }
     }
 
-    fn configure(self, command: &mut Command, quality: u8, speed: RenderSpeed) {
-        let quality = quality.clamp(1, 40).to_string();
+    fn description(&self) -> String {
+        match self {
+            Self::Vaapi(device) => format!("{} ({})", self.label(), device.display()),
+            _ => self.label().into(),
+        }
+    }
+
+    // Device initialization is global and must precede inputs and filter graphs.
+    fn configure_device(&self, command: &mut Command) {
+        if let Self::Vaapi(device) = self {
+            command.arg("-vaapi_device").arg(device);
+        }
+    }
+
+    fn software_frame_filter(&self) -> &'static str {
+        match self {
+            Self::Cpu => "format=yuv420p",
+            Self::Vaapi(_) => "format=nv12,hwupload",
+            _ => "format=nv12",
+        }
+    }
+
+    fn configure_pixel_format(&self, command: &mut Command) {
+        command.args(["-pix_fmt", match self {
+            Self::Cpu => "yuv420p",
+            Self::Vaapi(_) => "vaapi",
+            _ => "nv12",
+        }]);
+    }
+
+    fn configure(&self, command: &mut Command, settings: &ExportSettings) {
+        let quality = settings.crf.clamp(1, 40).to_string();
+        let speed = settings.speed;
         let preset = match (self, speed) {
             (Self::Cpu, RenderSpeed::Balanced) => "veryfast",
             (Self::Cpu, RenderSpeed::Fast) => "ultrafast",
@@ -214,7 +249,9 @@ impl VideoEncoder {
             (Self::Qsv, RenderSpeed::Compact) => "slow",
             (Self::Amf, RenderSpeed::Balanced) => "balanced",
             (Self::Amf, RenderSpeed::Fast) => "speed",
-            (Self::Amf, RenderSpeed::Compact) => "quality" };
+            (Self::Amf, RenderSpeed::Compact) => "quality",
+            // These APIs have no portable equivalent of the above presets.
+            (Self::VideoToolbox | Self::Vaapi(_), _) => "" };
         match self {
             Self::Cpu => {
                 command.args(["-c:v", "libx264", "-preset", preset, "-crf", &quality]);
@@ -250,6 +287,29 @@ impl VideoEncoder {
                 command.args([
                     "-c:v", "h264_amf", "-quality", preset, "-rc", "cqp", "-qp_i", &quality,
                     "-qp_p", &quality, "-qp_b", &quality,
+                ]);
+            }
+            Self::VideoToolbox => {
+                // VT constant quality is not supported by Intel Macs. Average
+                // bitrate works on both Intel and Apple Silicon; map the quality
+                // control monotonically, without pretending this is x264 CRF.
+                let pixels = (settings.width.max(16) & !1) as f64
+                    * (settings.height.max(16) & !1) as f64;
+                let bitrate = (pixels * settings.frame_rate.fps() * 0.12
+                    * 2.0_f64.powf((21.0 - settings.crf.clamp(1, 40) as f64) / 6.0))
+                    .clamp(100_000.0, 240_000_000.0).round() as u64;
+                command.args([
+                    "-c:v", "h264_videotoolbox", "-allow_sw", "0", "-b:v",
+                    &bitrate.to_string(), "-realtime",
+                    if speed == RenderSpeed::Fast { "1" } else { "0" },
+                ]);
+            }
+            Self::Vaapi(_) => {
+                // CQP avoids driver-dependent ICQ/QVBR support. No B frames
+                // also accommodates older and low-end VAAPI H.264 devices.
+                command.args([
+                    "-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", &quality,
+                    "-bf", "0",
                 ]);
             }
         }
@@ -810,7 +870,7 @@ fn export_direct(
     ffmpeg: &Path,
     plan: &DirectExport,
     settings: &ExportSettings,
-    encoder: VideoEncoder,
+    encoder: &VideoEncoder,
     mixed_audio: Option<&TemporaryAudioFile>,
     gpu_resident: bool,
     cancel: &AtomicBool,
@@ -826,6 +886,7 @@ fn export_direct(
         .ok_or("Export exceeds the source frame range")?;
     let mut command = ffmpeg_command(ffmpeg);
     command.args(["-y", "-threads", "2"]);
+    encoder.configure_device(&mut command);
     if gpu_resident {
         command.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]);
     }
@@ -834,8 +895,8 @@ fn export_direct(
         gpu::resident_filter(plan, settings)
     } else {
         format!(
-        "[0:V:0]trim=start_frame={}:end_frame={last_frame},setpts=N/(({rate})*TB),scale={}:{}:flags=bilinear,format=rgb24,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p[v]",
-        plan.first_frame, plan.fitted_width, plan.fitted_height,
+        "[0:V:0]trim=start_frame={}:end_frame={last_frame},setpts=N/(({rate})*TB),scale={}:{}:flags=bilinear,format=rgb24,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,{}[v]",
+        plan.first_frame, plan.fitted_width, plan.fitted_height, encoder.software_frame_filter(),
     )
     };
     let audio_filter = match &plan.audio {
@@ -866,9 +927,9 @@ fn export_direct(
         .arg(format!("{video_filter};{audio_filter}"))
         .args(["-map", "[v]", "-map", "[a]", "-r", &rate, "-frames:v"])
         .arg(plan.frame_count.to_string());
-    encoder.configure(&mut command, settings.crf, settings.speed);
+    encoder.configure(&mut command, settings);
     if !gpu_resident {
-        command.args(["-pix_fmt", "yuv420p"]);
+        encoder.configure_pixel_format(&mut command);
     }
     command
         .args(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t"])
@@ -1035,6 +1096,7 @@ fn export_mp4_inner(
     if cancel.load(Ordering::Relaxed) {
         return Err("Export cancelled".into());
     }
+    send_progress(&progress, 0.0, "Checking export settings and source media".into());
     export_range(project, settings)?;
     if !settings.frame_rate.fps().is_finite() || settings.frame_rate.fps() <= 0.0 {
         return Err("Frame rate is invalid".into());
@@ -1080,7 +1142,7 @@ fn export_mp4_inner(
         let (start, end) = export_sequence_range(project, settings)?;
         Some(prepare_mixed_audio(project, start, end, cancel, &progress)?)
     };
-    let render = |encoder| {
+    let render = |encoder: &VideoEncoder| {
         if let Some(plan) = &direct {
             let try_hwaccel = gpu::resident_available(
                 &ffmpeg,
@@ -1136,7 +1198,8 @@ fn export_mp4_inner(
             )
         }
     };
-    if let Err(error) = render(encoder) {
+    let mut completed_encoder = encoder.clone();
+    if let Err(error) = render(&encoder) {
         if cancel.load(Ordering::Acquire) {
             return Err("Export cancelled".into());
         }
@@ -1146,7 +1209,8 @@ fn export_mp4_inner(
         gpu::encoder_failed(&ffmpeg, settings, &error);
         if matches!(settings.encoder, EncoderPreference::Hardware) {
             return Err(format!(
-                "Required hardware encoding failed; output was not replaced. {error}"
+                "Required hardware encoding failed ({}); output was not replaced. {error}",
+                encoder.description()
             ));
         }
         let detail: String = error.chars().take(180).collect();
@@ -1155,9 +1219,10 @@ fn export_mp4_inner(
             0.0,
             format!("{} failed; retrying CPU · {detail}", encoder.label()),
         );
-        render(VideoEncoder::Cpu).map_err(|fallback| {
+        render(&VideoEncoder::Cpu).map_err(|fallback| {
             format!("Hardware encoding failed: {detail}. CPU fallback: {fallback}")
         })?;
+        completed_encoder = VideoEncoder::Cpu;
     }
     if cancel.load(Ordering::Relaxed) {
         return Err("Export cancelled".into());
@@ -1167,7 +1232,7 @@ fn export_mp4_inner(
     let _ = progress.send(ExportProgress {
         preparation: None,
         fraction: 1.0,
-        message: format!("Wrote {}", settings.output.display()),
+        message: format!("Wrote {} · {}", settings.output.display(), completed_encoder.description()),
         remaining_seconds: None,
         done: true,
         error: None });
@@ -1177,7 +1242,7 @@ fn export_mp4_inner(
 fn export_composited(
     project: &Project,
     settings: &ExportSettings,
-    encoder: VideoEncoder,
+    encoder: &VideoEncoder,
     audio_temp: &TemporaryAudioFile,
     cancel: &AtomicBool,
     progress: Sender<ExportProgress>,
@@ -1196,7 +1261,6 @@ fn export_composited(
     let encoded_duration = settings.frame_rate.frame_to_seconds(frame_count);
     let width = (settings.width.max(16)) & !1;
     let height = (settings.height.max(16)) & !1;
-    let crf = settings.crf.clamp(1, 40);
 
     let mut source = CachingSource::new();
     source.set_project_media(&project.media);
@@ -1218,6 +1282,7 @@ fn export_composited(
 
     let rate = format!("{}/{}", settings.frame_rate.num, settings.frame_rate.den);
     let mut command = ffmpeg_command(&ffmpeg);
+    encoder.configure_device(&mut command);
     command
         .arg("-y")
         .arg("-nostdin")
@@ -1242,10 +1307,10 @@ fn export_composited(
         .arg("2")
         .arg("-i")
         .arg(&audio_temp.path);
-    encoder.configure(&mut command, crf, settings.speed);
+    command.args(["-vf", encoder.software_frame_filter()]);
+    encoder.configure(&mut command, settings);
+    encoder.configure_pixel_format(&mut command);
     let child = command
-        .arg("-pix_fmt")
-        .arg("yuv420p")
         .arg("-c:a")
         .arg("aac")
         .arg("-b:a")
