@@ -1,7 +1,7 @@
 mod layout;
 pub(crate) mod ops;
 
-pub use layout::{frame_at, hit_rows, layout_rows, snap_targets, Edge, Hit, TrackRow};
+pub use layout::{frame_at, hit_rows, layout_rows, layout_rows_with_density, hit_layout, snap_targets, Edge, Hit, TrackRow};
 pub use ops::{plan_placements, plan_placements_in_range, ClipCopy, Placement};
 
 // Retain snap ordering/tie behavior while rejecting unrepresentable distances.
@@ -157,6 +157,34 @@ pub struct Editor {
     pub armed: Option<TransitionKind> }
 
 impl Editor {
+    pub fn clear_shared_history(&mut self) {
+        self.undo.clear(); self.redo.clear(); self.coalesce=None; self.coalesce_at=None;
+        self.gesture=None; self.gesture_before=None; self.gesture_feedback=None;
+        self.adjustment_control=None;
+    }
+
+    /// Replace only shared document state; transport, selection, paths and source
+    /// marks belong to this editor. Collaborative undo is handled by compensation.
+    pub fn apply_shared_project(&mut self, mut project: Project) {
+        let same=self.project.document_id==project.document_id;
+        let seconds=self.project.sequence.frame_rate.frame_to_seconds(self.project.sequence.playhead);
+        project.shortcut_profile=self.project.shortcut_profile;
+        project.sequence.playhead=project.sequence.frame_rate.seconds_to_frame(seconds).max(0);
+        project.sequence.zoom=self.project.sequence.zoom; project.sequence.scroll=self.project.sequence.scroll;
+        project.sequence.snap=self.project.sequence.snap;
+        project.sequence.in_point=self.project.sequence.in_point;
+        project.sequence.out_point=self.project.sequence.out_point;
+        if same {
+            for media in &mut project.media {
+                if let Some(local)=self.project.media(media.id) {
+                    media.path=local.path.clone();media.source_in_mark=local.source_in_mark;media.source_out_mark=local.source_out_mark;
+                    if media.source_range().is_err(){media.clear_source_marks();}
+                }
+            }
+        }
+        self.project=project;self.clear_shared_history();self.dirty=true;self.sanitize_selection();
+    }
+
     pub fn session_snapshot(&self) -> EditorSession {
         EditorSession {
             version: 1,
@@ -180,11 +208,13 @@ impl Editor {
 
     pub fn from_session(mut session: EditorSession) -> Result<Self, String> {
         session.validate()?;
+        let document_id = session.project.document_id.clone();
         for project in std::iter::once(&mut session.project)
             .chain(session.undo.iter_mut().map(std::sync::Arc::make_mut))
             .chain(session.redo.iter_mut().map(std::sync::Arc::make_mut))
         {
             project.migrate()?;
+            project.document_id = document_id.clone();
             project.ensure_integrity();
         }
         let mut editor = Self::from_project(session.project);
@@ -1054,6 +1084,7 @@ impl Editor {
     }
 
     pub fn adjust(&mut self, field: &str, value: f32) {
+        if !value.is_finite() { return; }
         let Some(id) = self.primary_clip() else {
             return;
         };
@@ -1080,6 +1111,17 @@ impl Editor {
                 "pos-x" => clip.pos_x = value,
                 "pos-y" => clip.pos_y = value,
                 "scale" => clip.scale = value.max(0.01),
+                "rotation" => clip.transform.rotation = value.clamp(-36000.0,36000.0),
+                "scale-x" => clip.transform.scale_x = value.clamp(0.01,10.0),
+                "scale-y" => clip.transform.scale_y = value.clamp(0.01,10.0),
+                "anchor-x" => clip.transform.anchor_x = value.clamp(0.0,1.0),
+                "anchor-y" => clip.transform.anchor_y = value.clamp(0.0,1.0),
+                "crop-left" => clip.transform.crop_left = value.clamp(0.0,1.0),
+                "crop-right" => clip.transform.crop_right = value.clamp(0.0,1.0),
+                "crop-top" => clip.transform.crop_top = value.clamp(0.0,1.0),
+                "crop-bottom" => clip.transform.crop_bottom = value.clamp(0.0,1.0),
+                "flip-x" => clip.transform.flip_x = value >= 0.5,
+                "flip-y" => clip.transform.flip_y = value >= 0.5,
                 "opacity" => clip.opacity = value.clamp(0.0, 1.0),
                 "volume" => clip.volume = value.clamp(0.0, 2.0),
                 "exposure" => clip.grade.exposure = value,

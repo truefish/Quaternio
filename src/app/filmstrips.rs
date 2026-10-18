@@ -138,6 +138,7 @@ fn view_key(state: &AppState, vertical: f32, visible: bool) -> ViewKey {
             state.edit_gen,
             state.timeline_w,
             state.track_body,
+            state.preferences.track_density,
         ),
         vertical: vertical.to_bits(),
         visible }
@@ -295,7 +296,8 @@ pub(super) fn picture(
                 state.edit_gen,
                 state.timeline_w,
                 state.track_body,
-            )
+                state.preferences.track_density,
+        )
     {
         return empty();
     }

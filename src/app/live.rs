@@ -64,7 +64,8 @@ struct View {
     export_inout: bool,
     export_crf: f32,
     export_speed: i32,
-    export_encoder: i32 }
+    export_encoder: i32,
+    export_amd_adapter: String }
 
 impl Default for View {
     fn default() -> Self {
@@ -90,7 +91,8 @@ impl Default for View {
             export_inout: false,
             export_crf: 21.0,
             export_speed: 0,
-            export_encoder: 0 }
+            export_encoder: 0,
+            export_amd_adapter: String::new() }
     }
 }
 
@@ -118,7 +120,8 @@ impl View {
             export_inout: ui.get_export_inout(),
             export_crf: ui.get_export_crf(),
             export_speed: ui.get_export_speed(),
-            export_encoder: ui.get_export_encoder() }
+            export_encoder: ui.get_export_encoder(),
+            export_amd_adapter: ui.get_export_amd_adapter().to_string() }
     }
 
     fn restore(&self, ui: &AppWindow) {
@@ -144,7 +147,8 @@ impl View {
         ui.set_export_crf(self.export_crf.clamp(14.0, 28.0));
         ui.set_read_crf(format!("{}", ui.get_export_crf().round() as i32).into());
         ui.set_export_speed(self.export_speed.clamp(0, 2));
-        ui.set_export_encoder(self.export_encoder.clamp(0, 2));
+        ui.set_export_encoder(self.export_encoder.clamp(0, 3));
+        ui.set_export_amd_adapter(self.export_amd_adapter.clone().into());
     }
 }
 
@@ -157,6 +161,10 @@ struct SavedSettings {
     cpu: bool,
     #[serde(default)]
     hardware: bool,
+    #[serde(default)]
+    amd: bool,
+    #[serde(default)]
+    amd_adapter: Option<u32>,
     speed: i32,
     force_composite: bool,
     use_in_out: bool,
@@ -171,6 +179,8 @@ impl SavedSettings {
             crf: value.crf,
             cpu: matches!(value.encoder, EncoderPreference::Cpu),
             hardware: matches!(value.encoder, EncoderPreference::Hardware),
+            amd: matches!(value.encoder, EncoderPreference::Amd(_)),
+            amd_adapter: match value.encoder { EncoderPreference::Amd(adapter) => adapter, _ => None },
             speed: match value.speed {
                 RenderSpeed::Balanced => 0,
                 RenderSpeed::Fast => 1,
@@ -195,7 +205,9 @@ impl SavedSettings {
             height: self.height,
             frame_rate: self.frame_rate,
             crf: self.crf.clamp(14, 28),
-            encoder: if self.hardware {
+            encoder: if self.amd {
+                EncoderPreference::Amd(self.amd_adapter)
+            } else if self.hardware {
                 EncoderPreference::Hardware
             } else if self.cpu {
                 EncoderPreference::Cpu

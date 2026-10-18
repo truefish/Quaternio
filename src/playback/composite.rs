@@ -350,7 +350,8 @@ fn find_occlusion_start(
         // Fitting cannot fill both canvas axes at less than 100% scale. A
         // translated fitted picture at 100% also cannot cover the whole canvas.
         // These checks only reject candidates; decoded dimensions prove coverage.
-        if !clip.scale.is_finite()
+        if !clip.transform.is_identity()
+            || !clip.scale.is_finite()
             || !clip.pos_x.is_finite()
             || !clip.pos_y.is_finite()
             || clip.scale < 1.0
@@ -384,7 +385,7 @@ fn image_covers_canvas(
     sx: f32,
     sy: f32,
 ) -> bool {
-    if !valid_image(image) {
+    if !valid_image(image) || !clip.transform.is_identity() {
         return false;
     }
     let (x, y, dw, dh) = dest_rect(
@@ -419,6 +420,20 @@ fn blit_opaque_image(
     parallel: bool,
     aligned_grading: bool,
 ) {
+    if !clip.transform.is_identity() {
+        let Some(warp) = Warp::new(clip,image,dst.width,dst.height,sx,sy) else { return; };
+        let grade = PreparedByteGrade::new(clip.grade);
+        let stride = dst.width as usize * 3;
+        let rows = &mut dst.rgb[warp.y0 * stride..warp.y1 * stride];
+        with_rows_mut(rows,stride,(warp.x1-warp.x0)*(warp.y1-warp.y0),parallel,|dy,row| {
+            for x in warp.x0..warp.x1 {
+                if let Some(sample) = warp.sample(image,x,warp.y0+dy) {
+                    row[x*3..x*3+3].copy_from_slice(&grade.grade_u8(sample));
+                }
+            }
+        });
+        return;
+    }
     let (x, y, dw, dh) = dest_rect(
         dst.width,
         dst.height,
@@ -538,6 +553,23 @@ fn blit_clip(
     let Some(image) = decode_clip_image(project, clip, frame, canvas_w, canvas_h, source) else {
         return;
     };
+    if !clip.transform.is_identity() {
+        let Some(warp) = Warp::new(clip,&image,canvas_w,canvas_h,sx,sy) else { return; };
+        let grade = PreparedByteGrade::new(clip.grade);
+        let stride = canvas_w as usize;
+        let colors = &mut acc[warp.y0 * stride * 3..warp.y1 * stride * 3];
+        let alphas = &mut alpha[warp.y0 * stride..warp.y1 * stride];
+        with_blend_rows_mut(colors,alphas,stride,(warp.x1-warp.x0)*(warp.y1-warp.y0),parallel,|dy,color,opacity| {
+            for x in warp.x0..warp.x1 {
+                if let Some(sample) = warp.sample(&image,x,warp.y0+dy) {
+                    let rgb = grade.grade_rgb(sample);
+                    for c in 0..3 { color[x*3+c] += rgb[c]*255.0*weight; }
+                    opacity[x] += weight;
+                }
+            }
+        });
+        return;
+    }
     let (x, y, dw, dh) = dest_rect(
         canvas_w,
         canvas_h,
@@ -624,6 +656,46 @@ fn blit_clip(
     );
 }
 
+/// Inverse affine sampling keeps the same source coordinates for preview and
+/// export. Ordinary clips retain the existing row-copy and prepared-sample paths.
+struct Warp {
+    x0: usize, y0: usize, x1: usize, y1: usize,
+    center_x: f32, center_y: f32, width: f32, height: f32,
+    sin: f32, cos: f32, transform: crate::project::Transform,
+}
+impl Warp {
+    fn new(clip: &Clip, image: &ImageBuf, w: u32, h: u32, sx: f32, sy: f32) -> Option<Self> {
+        let t = clip.transform;
+        let fit = (w as f32 / image.width.max(1) as f32).min(h as f32 / image.height.max(1) as f32);
+        let width = image.width as f32 * fit * clip.scale * t.scale_x;
+        let height = image.height as f32 * fit * clip.scale * t.scale_y;
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 || !t.rotation.is_finite()
+            || !clip.pos_x.is_finite() || !clip.pos_y.is_finite() || t.crop_left+t.crop_right >= 1.0 || t.crop_top+t.crop_bottom >= 1.0 { return None; }
+        let (sin,cos) = t.rotation.to_radians().sin_cos();
+        let center_x = w as f32*0.5+clip.pos_x*sx; let center_y = h as f32*0.5+clip.pos_y*sy;
+        let mut left = f32::INFINITY; let mut right = f32::NEG_INFINITY;
+        let mut top = f32::INFINITY; let mut bottom = f32::NEG_INFINITY;
+        for (u,v) in [(0.0,0.0),(1.0,0.0),(0.0,1.0),(1.0,1.0)] {
+            let x = (u-t.anchor_x)*width; let y = (v-t.anchor_y)*height;
+            let px = center_x+x*cos-y*sin; let py = center_y+x*sin+y*cos;
+            left=left.min(px); right=right.max(px); top=top.min(py); bottom=bottom.max(py);
+        }
+        let x0 = left.floor().max(0.0).min(w as f32) as usize; let x1=right.ceil().max(0.0).min(w as f32) as usize;
+        let y0 = top.floor().max(0.0).min(h as f32) as usize; let y1=bottom.ceil().max(0.0).min(h as f32) as usize;
+        if x0 >= x1 || y0 >= y1 { return None; }
+        Some(Self { x0,y0,x1,y1,center_x,center_y,width,height,sin,cos,transform:t })
+    }
+    fn sample(&self, image: &ImageBuf, x: usize, y: usize) -> Option<[u8;3]> {
+        let dx=x as f32+0.5-self.center_x; let dy=y as f32+0.5-self.center_y;
+        let mut u=(dx*self.cos+dy*self.sin)/self.width+self.transform.anchor_x;
+        let mut v=(-dx*self.sin+dy*self.cos)/self.height+self.transform.anchor_y;
+        if self.transform.flip_x { u=1.0-u; } if self.transform.flip_y { v=1.0-v; }
+        if u < self.transform.crop_left || u >= 1.0-self.transform.crop_right
+            || v < self.transform.crop_top || v >= 1.0-self.transform.crop_bottom { return None; }
+        Some(sample_prepared(image,&SampleColumn::new(image,u.clamp(0.0,0.9999)),&SampleRow::new(image,v.clamp(0.0,0.9999))))
+    }
+}
+
 pub fn dest_rect(
     canvas_w: u32,
     canvas_h: u32,
@@ -707,4 +779,3 @@ fn sample_prepared(image: &ImageBuf, column: &SampleColumn, row: &SampleRow) -> 
     }
     out
 }
-

@@ -49,19 +49,21 @@ pins; review and verify replacement archives, and retain an authorized mirror
 before upstream downloads expire.
 
 `release.yml` packages Windows, Linux x86_64, and both macOS architectures.
-Every artifact, including NSIS, includes licenses, source references, binary
-hashes, and native `-version`, `-buildconf`, and `-L` output for both sidecars.
-`check.yml` runs `cargo check` on those platforms; it does not test FFmpeg or exports.
+Application artifacts, including NSIS, contain no FFmpeg executables. Runtime setup uses this lock manifest, verifies downloads and required capabilities, retains license/source notices and tool build information, and stores the engine outside application release folders. Existing compatible installations can be selected without downloading. The preparation script remains available for development and offline distribution.
+`check.yml` runs `cargo check` and behavioral tests on those platforms; physical GPU/export validation remains separate.
 
 ## Limits
 
 - These are checksum-pinned third-party binaries, not reproducible source builds.
-  Native release workers download and inspect FFmpeg; they do not compile it.
+  Managed media-engine setup downloads and inspects FFmpeg; application release
+  jobs do not bundle or compile it.
 - Exact dependency source revisions, patches, and a complete corresponding
   source bundle have not been established and are unavailable in this repository.
   Notices and builder links do not establish complete license compliance.
 - Windows preparation and all archive hashes/extraction were checked locally.
-  Linux/macOS runtime behavior and NSIS compilation still need native validation.
+  Ubuntu 22.04 under WSL2 passed optimized builds, X11 preview startup with both
+  renderers, and CPU exports with installed FFmpeg 4.4.2. Physical Linux GPU/Wayland,
+  macOS runtime, managed Linux engine download, and NSIS compilation still need validation.
   Intel binaries match the builder's published hashes and have x86_64 headers.
 - macOS packages use ad-hoc signing, without Developer ID signing or notarization.
   FFmpeg versions differ by platform; codec parity is not established.

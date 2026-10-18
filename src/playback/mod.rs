@@ -7,6 +7,7 @@ pub mod optimized;
 pub mod timeline_waveforms;
 pub mod filmstrips;
 pub use native_preview::set_index_busy;
+pub use decode::set_preview_hardware;
 pub mod telemetry;
 mod thumbnails;
 

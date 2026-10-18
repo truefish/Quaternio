@@ -1,5 +1,5 @@
 # Tag-triggered multi-OS release. Jobs listed Windows → Linux → macOS (priority).
-# FFmpeg archive bytes are pinned in packaging/ffmpeg-lock.json; not source-reproducible.
+# Media tools are installed separately at runtime; app archives contain no FFmpeg payload.
 name: Release
 
 on:
@@ -45,9 +45,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Prepare checksum-verified FFmpeg (win64)
-        run: python packaging/ffmpeg.py windows-x86_64
-
       - name: Build release
         run: cargo build --release --locked
 
@@ -57,10 +54,7 @@ jobs:
           $tag = $env:GITHUB_REF_NAME
           New-Item -ItemType Directory -Force -Path packaging/stage, dist | Out-Null
           Copy-Item target/release/quaternio.exe packaging/stage/quaternio.exe
-          Copy-Item packaging/cache/prepared/ffmpeg.exe packaging/stage/ffmpeg.exe
-          Copy-Item packaging/cache/prepared/ffprobe.exe packaging/stage/ffprobe.exe
           Copy-Item LICENSE packaging/stage/LICENSE
-          Copy-Item -Recurse packaging/cache/prepared/FFmpeg-notices packaging/stage/FFmpeg-notices
 
           $portable = "dist/Quaternio-Windows-Portable-$tag.zip"
           if (Test-Path $portable) { Remove-Item $portable }
@@ -112,9 +106,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Prepare checksum-verified FFmpeg (linux64)
-        run: python packaging/ffmpeg.py linux-x86_64
-
       - name: Build release
         run: cargo build --release --locked
 
@@ -125,11 +116,8 @@ jobs:
           STAGE="packaging/stage/${NAME}"
           mkdir -p "$STAGE" dist
           cp target/release/quaternio "$STAGE/quaternio"
-          cp packaging/cache/prepared/ffmpeg "$STAGE/ffmpeg"
-          cp packaging/cache/prepared/ffprobe "$STAGE/ffprobe"
           cp LICENSE "$STAGE/LICENSE"
-          cp -R packaging/cache/prepared/FFmpeg-notices "$STAGE/FFmpeg-notices"
-          chmod +x "$STAGE/quaternio" "$STAGE/ffmpeg" "$STAGE/ffprobe"
+          chmod +x "$STAGE/quaternio"
           tar -czf "dist/${NAME}.tar.gz" -C packaging/stage "$NAME"
 
       - name: Upload Linux artifact
@@ -161,9 +149,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Prepare checksum-verified FFmpeg (macOS)
-        run: python packaging/ffmpeg.py macos-${{ matrix.arch }}
-
       - name: Build release
         run: cargo build --release --locked
 
@@ -175,11 +160,8 @@ jobs:
           STAGE="packaging/stage/${NAME}"
           mkdir -p "$STAGE" dist
           cp target/release/quaternio "$STAGE/quaternio"
-          cp packaging/cache/prepared/ffmpeg "$STAGE/ffmpeg"
-          cp packaging/cache/prepared/ffprobe "$STAGE/ffprobe"
           cp LICENSE "$STAGE/LICENSE"
-          cp -R packaging/cache/prepared/FFmpeg-notices "$STAGE/FFmpeg-notices"
-          chmod +x "$STAGE/quaternio" "$STAGE/ffmpeg" "$STAGE/ffprobe"
+          chmod +x "$STAGE/quaternio"
           codesign -s - "$STAGE/quaternio" || true
           tar -czf "dist/${NAME}.tar.gz" -C packaging/stage "$NAME"
           echo "Packed ${NAME}.tar.gz (uname -m = ${ARCH})"

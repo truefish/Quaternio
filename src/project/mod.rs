@@ -1,3 +1,4 @@
+pub mod review;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -6,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub const PROJECT_VERSION: u32 = 3;
+pub const PROJECT_VERSION: u32 = 5;
 pub const STILL_DURATION_SECS: f64 = 5.0;
 
 /// An exclusively created sibling of the destination, never the last good save.
@@ -59,6 +60,18 @@ impl Drop for StagedProjectSave {
             let _ = fs::remove_file(&self.path);
         }
     }
+}
+
+/// Publish a fully flushed sibling file, preserving the previous destination on
+/// write failure. Shared by local project and collaboration checkpoints.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let (mut staged, mut file) = StagedProjectSave::create(path)?;
+    let result = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    result.map_err(|e| e.to_string())?;
+    fs::rename(&staged.path, path).map_err(|e| e.to_string())?;
+    staged.published = true;
+    Ok(())
 }
 
 fn normalize_bin_name(name: &str) -> Result<String, String> {
@@ -684,6 +697,8 @@ pub struct Clip {
     pub scale: f32,
     pub opacity: f32,
     #[serde(default)]
+    pub transform: Transform,
+    #[serde(default)]
     pub grade: crate::color::Grade }
 
 impl Clip {
@@ -703,6 +718,39 @@ impl Clip {
 
     pub fn contains(&self, frame: i64) -> bool {
         frame >= self.timeline_start && frame < self.end()
+    }
+}
+
+/// Additional motion controls; crop and anchor use source-normalized axes.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Transform {
+    pub rotation: f32,
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub anchor_x: f32,
+    pub anchor_y: f32,
+    pub crop_left: f32,
+    pub crop_right: f32,
+    pub crop_top: f32,
+    pub crop_bottom: f32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+impl Default for Transform {
+    fn default() -> Self {
+        Self { rotation: 0.0, scale_x: 1.0, scale_y: 1.0, anchor_x: 0.5, anchor_y: 0.5,
+            crop_left: 0.0, crop_right: 0.0, crop_top: 0.0, crop_bottom: 0.0, flip_x: false, flip_y: false }
+    }
+}
+impl Transform {
+    pub fn is_identity(&self) -> bool { *self == Self::default() }
+    pub fn sanitize(&mut self) {
+        fn finite(v: &mut f32, default: f32, min: f32, max: f32) { *v = if v.is_finite() { v.clamp(min,max) } else { default }; }
+        finite(&mut self.rotation,0.0,-36000.0,36000.0);
+        finite(&mut self.scale_x,1.0,0.01,10.0); finite(&mut self.scale_y,1.0,0.01,10.0);
+        finite(&mut self.anchor_x,0.5,0.0,1.0); finite(&mut self.anchor_y,0.5,0.0,1.0);
+        for crop in [&mut self.crop_left,&mut self.crop_right,&mut self.crop_top,&mut self.crop_bottom] { finite(crop,0.0,0.0,1.0); }
     }
 }
 
@@ -843,6 +891,10 @@ impl Sequence {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default = "new_document_id")]
+    pub document_id: String,
+    #[serde(default)]
+    pub review_notes: Vec<review::ReviewNote>,
     #[serde(default = "legacy_project_version")]
     pub version: u32,
     pub name: String,
@@ -853,6 +905,8 @@ pub struct Project {
     #[serde(default)]
     pub bins: Vec<String>,
     pub next_id: u64 }
+
+fn new_document_id() -> String { uuid::Uuid::new_v4().to_string() }
 
 fn legacy_project_version() -> u32 {
     1
@@ -867,6 +921,8 @@ impl Project {
     pub fn new_default(name: &str) -> Self {
         let mut project = Self {
             version: PROJECT_VERSION,
+            document_id: new_document_id(),
+            review_notes: Vec::new(),
             name: name.to_string(),
             shortcut_profile: ShortcutProfile::Premiere,
             sequence: Sequence {
@@ -1069,6 +1125,7 @@ impl Project {
                 }
             }
         }
+        for note in &mut self.review_notes { note.frame = map(note.frame).max(0); }
         self.sequence.playhead = map(self.sequence.playhead).max(0);
         self.sequence.in_point = self.sequence.in_point.map(|frame| map(frame).max(0));
         self.sequence.out_point = self.sequence.out_point.map(|frame| map(frame).max(0));
@@ -1129,9 +1186,12 @@ impl Project {
 
     pub fn migrate(&mut self) -> Result<(), String> {
         Self::validate_version(self.version)?;
+        review::validate_notes(&self.review_notes)?;
+        if uuid::Uuid::parse_str(&self.document_id).is_err() { return Err("Invalid project document identity".into()); }
         // v1 lacked Source marks and precise offsets; serde defaults retain its
         // full-source insertion and integer sequence-frame source origins.
         // v1/v2 lacked track Solo; serde defaults keep every audio track audible.
+        // v1-v3 lack extended motion; identity defaults retain their pictures.
         self.version = PROJECT_VERSION;
         Ok(())
     }
@@ -1156,7 +1216,8 @@ impl Project {
         for transition in &self.sequence.transitions {
             max_id = max_id.max(transition.id);
         }
-        self.next_id = self.next_id.max(max_id + 1).max(1);
+        for note in &self.review_notes { max_id = max_id.max(note.id); }
+        self.next_id = self.next_id.max(max_id.saturating_add(1)).max(1);
         if !self
             .sequence
             .tracks
@@ -1178,6 +1239,7 @@ impl Project {
                 track.solo = false;
             }
             for clip in &mut track.clips {
+                clip.transform.sanitize();
                 if !clip.source_time_offset.is_finite() {
                     clip.source_time_offset = 0.0;
                 }

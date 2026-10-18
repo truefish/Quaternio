@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use i_slint_backend_winit::winit::event::{ElementState, WindowEvent};
 use i_slint_backend_winit::winit::keyboard::{Key, NamedKey};
-use i_slint_backend_winit::{WinitWindowAccessor, WinitWindowEventResult};
+use i_slint_backend_winit::{WinitWindowAccessor, EventResult};
 
 const MAX_PENDING_FILES: usize = 1024;
 const MAX_PENDING_PALETTE_KEYS: usize = 256;
@@ -70,14 +70,14 @@ impl FileDropQueue {
                                 if mailbox.palette_keys.len() < MAX_PENDING_PALETTE_KEYS {
                                     mailbox.palette_keys.push_back(command);
                                 }
-                                return WinitWindowEventResult::PreventDefault;
+                                return EventResult::PreventDefault;
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            WinitWindowEventResult::Propagate
+            EventResult::Propagate
         });
         Self { mailbox }
     }

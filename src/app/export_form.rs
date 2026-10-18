@@ -17,17 +17,20 @@ pub(super) struct State {
 struct Fields {
     filename: String, folder: String, path: String, width: String, height: String,
     fps: i32, custom_rate: String, crf: f32, speed: i32, encoder: i32, inout: bool,
+    amd_adapter: String,
 }
 
 impl Fields {
     fn capture(ui: &AppWindow) -> Self {
         Self { filename: ui.get_export_filename().to_string(), folder: ui.get_export_folder().to_string(),
+            amd_adapter: ui.get_export_amd_adapter().to_string(),
             path: ui.get_export_path().to_string(), width: ui.get_export_width().to_string(), height: ui.get_export_height().to_string(),
             fps: ui.get_export_fps(), custom_rate: ui.get_export_custom_rate().to_string(), crf: ui.get_export_crf(),
             speed: ui.get_export_speed(), encoder: ui.get_export_encoder(), inout: ui.get_export_inout() }
     }
 
     fn restore(&self, ui: &AppWindow) {
+        ui.set_export_amd_adapter(self.amd_adapter.clone().into());
         ui.set_export_filename(self.filename.clone().into());
         ui.set_export_folder(self.folder.clone().into());
         ui.set_export_path(self.path.clone().into());
@@ -104,6 +107,13 @@ fn range_summary(ui: &AppWindow, project: &Project) {
     ui.set_export_range_label(label.into());
 }
 
+fn amd_adapter(ui: &AppWindow) -> Result<Option<u32>, String> {
+    let text = ui.get_export_amd_adapter();
+    if text.trim().is_empty() { return Ok(None); }
+    if !cfg!(windows) { return Err("AMD adapter indices apply to Windows. On Linux select a render device using QUATERNIO_VAAPI_DEVICE.".into()); }
+    text.trim().parse::<u32>().ok().filter(|v| *v < 32).map(Some).ok_or_else(|| "AMD adapter index must be 0..31, or blank for automatic selection.".into())
+}
+
 pub(super) fn settings(ui: &AppWindow, project: &Project) -> Result<ExportSettings, String> {
     let output = export_destination::resolve(&ui.get_export_folder(), &ui.get_export_filename())?;
     let (width, height) = parse_export_dimensions(&ui.get_export_width(), &ui.get_export_height())?;
@@ -117,6 +127,7 @@ pub(super) fn settings(ui: &AppWindow, project: &Project) -> Result<ExportSettin
     };
     let encoder = match ui.get_export_encoder() {
         0 => EncoderPreference::Auto, 1 => EncoderPreference::Cpu, 2 => EncoderPreference::Hardware,
+        3 => EncoderPreference::Amd(amd_adapter(ui)?),
         _ => return Err("Choose an encoding method.".into()),
     };
     range(project, ui.get_export_inout())?;
@@ -439,14 +450,14 @@ fn valid(format: &ExportFormat) -> bool {
         && format.frame_rate.num > 0 && format.frame_rate.den > 0
         && format.frame_rate.fps() <= 1000.0 && format.crf.is_finite()
         && (14.0..=28.0).contains(&format.crf)
-        && (0..=2).contains(&format.speed) && (0..=2).contains(&format.encoder)
+        && (0..=2).contains(&format.speed) && (0..=3).contains(&format.encoder)
 }
 
 pub(super) fn remember(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     if !ui.get_export_initialized() { return; }
     let Ok((width, height)) = parse_export_dimensions(&ui.get_export_width(), &ui.get_export_height()) else { return; };
     let Ok(frame_rate) = rate(ui) else { return; };
-    let format = ExportFormat { width, height, frame_rate, crf: ui.get_export_crf(), speed: ui.get_export_speed(), encoder: ui.get_export_encoder() };
+    let format = ExportFormat { width, height, frame_rate, crf: ui.get_export_crf(), speed: ui.get_export_speed(), encoder: ui.get_export_encoder(), amd_adapter: amd_adapter(ui).ok().flatten() };
     if valid(&format) { state.borrow_mut().preferences.export_format = Some(format); }
 }
 
@@ -505,6 +516,7 @@ pub(super) fn prepare(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) 
             ui.set_export_crf(format.crf);
             ui.set_export_speed(format.speed);
             ui.set_export_encoder(format.encoder);
+            ui.set_export_amd_adapter(format.amd_adapter.map(|i| i.to_string()).unwrap_or_default().into());
             ui.set_export_initialized(true);
         } else {
             match_sequence(ui, state);

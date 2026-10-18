@@ -103,13 +103,30 @@ fn candidates() -> (Vec<VideoEncoder>, String) {
         // it handles both Intel and AMD without their optional vendor runtimes.
         let mut encoders = vec![VideoEncoder::Nvenc];
         encoders.extend(devices.into_iter().map(VideoEncoder::Vaapi));
-        encoders.extend([VideoEncoder::Qsv, VideoEncoder::Amf]);
+        encoders.extend([VideoEncoder::Qsv, VideoEncoder::Amf(None)]);
         return (encoders, reason);
     }
     if cfg!(windows) {
-        return (vec![VideoEncoder::Nvenc, VideoEncoder::Qsv, VideoEncoder::Amf], String::new());
+        return (vec![VideoEncoder::Nvenc, VideoEncoder::Qsv, VideoEncoder::Amf(None)], String::new());
     }
     (Vec::new(), "No hardware export backend is configured for this platform. ".into())
+}
+
+fn is_amd_vaapi(encoder: &VideoEncoder) -> bool {
+    let VideoEncoder::Vaapi(device) = encoder else { return false; };
+    let Some(name) = device.file_name() else { return false; };
+    let vendor = PathBuf::from("/sys/class/drm").join(name).join("device/vendor");
+    std::fs::read_to_string(vendor).is_ok_and(|value| value.trim().eq_ignore_ascii_case("0x1002"))
+}
+
+fn selected_candidates(settings: &ExportSettings) -> (Vec<VideoEncoder>, String) {
+    let (mut candidates, reason) = candidates();
+    if let EncoderPreference::Amd(adapter) = settings.encoder {
+        if cfg!(windows) { candidates = vec![VideoEncoder::Amf(adapter)]; }
+        candidates.retain(|encoder| if cfg!(windows) { matches!(encoder, VideoEncoder::Amf(_)) }
+            else if cfg!(target_os = "linux") { is_amd_vaapi(encoder) } else { false });
+    }
+    (candidates, reason)
 }
 
 pub(super) fn safe_source_metadata(stream: &serde_json::Value) -> bool {
@@ -189,7 +206,7 @@ pub(super) fn preferred(
     if matches!(settings.encoder, EncoderPreference::Cpu) {
         return Ok(VideoEncoder::Cpu);
     }
-    let (candidates, discovery_reason) = candidates();
+    let (candidates, discovery_reason) = selected_candidates(settings);
     let key = selection_key(ffmpeg, settings, candidates.clone());
     let cached = key
         .as_ref()
@@ -275,7 +292,7 @@ pub(super) fn preferred(
         diagnostics::record(|d| d.fallback_reasons.push(selection.reason.clone()));
     }
     if selection.encoder == VideoEncoder::Cpu {
-        if matches!(settings.encoder, EncoderPreference::Hardware) {
+        if matches!(settings.encoder, EncoderPreference::Hardware | EncoderPreference::Amd(_)) {
             return Err(format!(
                 "Hardware encoding is unavailable at {}x{} {}/{} fps using {}. {}Check this FFmpeg build's H.264 encoders and the GPU driver/device access, or choose Auto/CPU.",
                 settings.width.max(16) & !1, settings.height.max(16) & !1,
@@ -294,19 +311,16 @@ pub(super) fn preferred(
     Ok(selection.encoder)
 }
 
-pub(super) fn encoder_failed(ffmpeg: &Path, settings: &ExportSettings, reason: &str) {
-    if let Some(key) = selection_key(ffmpeg, settings, candidates().0) {
+pub(super) fn encoder_failed(ffmpeg: &Path, settings: &ExportSettings) {
+    if let Some(key) = selection_key(ffmpeg, settings, selected_candidates(settings).0) {
         let mut cache = ENCODERS
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        cache.insert(
-            key,
-            Selection {
-                encoder: VideoEncoder::Cpu,
-                reason: reason.chars().take(500).collect(),
-                at: Instant::now() },
-        );
+        // An export can fail because of media decoding, disk IO or muxing.
+        // Only an executed encoder probe may certify hardware unavailable.
+        // Invalidate the old success so the next job performs that probe.
+        cache.remove(&key);
     }
 }
 
@@ -315,12 +329,15 @@ pub(super) fn encoder_failed(ffmpeg: &Path, settings: &ExportSettings, reason: &
 // not a guarantee about copies inside a driver. VAAPI options are documented in
 // https://ffmpeg.org/doxygen/8.1/vf__scale__vaapi_8c.html.
 // Experimental backends must pass the complete decode/filter/encode probe.
-// AMF resident scaling remains unavailable; its software-frame encoder works.
+// AMF uses native AMF surfaces and vpp_amf; installations without this route
+// fail the complete probe and retain the software-frame AMF encoder.
+// https://github.com/GPUOpen-LibrariesAndSDKs/AMF/wiki/FFmpeg-and-AMF-HW-Acceleration
 fn resident_scale(encoder: &VideoEncoder, width: u32, height: u32) -> Option<String> {
     match encoder {
         VideoEncoder::Nvenc => Some(format!("scale_cuda={width}:{height}:format=nv12:interp_algo=bilinear")),
         VideoEncoder::Vaapi(_) => Some(format!("scale_vaapi=w={width}:h={height}:format=nv12")),
         VideoEncoder::Qsv => Some(format!("scale_qsv=w={width}:h={height}:format=nv12")),
+        VideoEncoder::Amf(_) => Some(format!("vpp_amf=w={width}:h={height}:format=nv12")),
         VideoEncoder::VideoToolbox => Some(format!("scale_vt=w={width}:h={height}")),
         _ => None,
     }
@@ -331,6 +348,11 @@ fn resident_scale(encoder: &VideoEncoder, width: u32, height: u32) -> Option<Str
 pub(super) fn configure_resident_input(command: &mut Command, encoder: &VideoEncoder, plan: &DirectExport) {
     match encoder {
         VideoEncoder::Nvenc => { command.args(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]); }
+        VideoEncoder::Amf(_) => {
+            encoder.configure_device(command);
+            command.args(["-hwaccel", "amf", "-hwaccel_output_format", "amf"]);
+            if matches!(encoder, VideoEncoder::Amf(Some(_))) { command.args(["-hwaccel_device", "quaternio_amf"]); }
+        }
         VideoEncoder::Vaapi(device) => {
             command.args(["-hwaccel", "vaapi", "-hwaccel_device"]).arg(device)
                 .args(["-hwaccel_output_format", "vaapi"]);
@@ -365,6 +387,7 @@ fn enabled(name: &str) -> bool {
 pub(super) fn resident_eligible(plan: &DirectExport, settings: &ExportSettings, encoder: &VideoEncoder) -> bool {
     !enabled("QUATERNIO_DISABLE_GPU_RESIDENT")
         && (*encoder == VideoEncoder::Nvenc
+            || (cfg!(windows) && matches!(encoder, VideoEncoder::Amf(_)))
             || (enabled("QUATERNIO_EXPERIMENTAL_GPU")
                 && ((cfg!(target_os = "linux") && matches!(encoder, VideoEncoder::Vaapi(_)))
                     || ((cfg!(windows) || cfg!(target_os = "linux")) && *encoder == VideoEncoder::Qsv)
@@ -443,7 +466,7 @@ pub(super) fn resident_available(
     command.args(["-an", "-filter_complex"]).arg(resident_filter(plan, settings, encoder))
         .args(["-map", "[v]", "-frames:v"]).arg(plan.frame_count.min(6).to_string())
         .arg("-enc_time_base:v").arg(format!("{}/{}", settings.frame_rate.den, settings.frame_rate.num))
-        .args(["-fps_mode", "passthrough"]);
+        .args(["-vsync", "0"]);
     encoder.configure(&mut command, settings);
     command.args(["-f", "h264", "pipe:1"]);
     // Long source trims may time out. Conservatively use the ordinary route;

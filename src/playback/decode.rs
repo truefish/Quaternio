@@ -17,42 +17,15 @@ use super::native_preview::{NativeDecodeError, NativePreviewClient, NativePrevie
 use super::{optimized::OptimizedCache, PreviewIntent};
 use crate::project::{Media, MediaKind};
 
-pub fn find_tool(name: &str) -> Option<PathBuf> {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            let exe_name = format!("{name}.exe");
-            let candidate = dir.join(exe_name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        let candidate = dir.join(format!("{name}.exe"));
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
+static PREVIEW_HARDWARE: AtomicBool = AtomicBool::new(true);
+pub fn set_preview_hardware(enabled: bool) { PREVIEW_HARDWARE.store(enabled, Ordering::Release); }
 
 pub fn find_ffmpeg() -> Result<PathBuf, String> {
-    find_tool("ffmpeg")
-        .ok_or_else(|| "FFmpeg was not found next to Quaternio or on PATH.".to_string())
+    crate::media_engine::discover().map(|engine| engine.ffmpeg)
 }
 
 pub fn find_ffprobe() -> Result<PathBuf, String> {
-    find_tool("ffprobe")
-        .ok_or_else(|| "ffprobe was not found next to Quaternio or on PATH.".to_string())
+    crate::media_engine::discover().map(|engine| engine.ffprobe)
 }
 
 fn media_command(tool: &Path) -> Command {
@@ -378,7 +351,23 @@ mod video_origin_cache;
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct VideoOrigin {
     seconds: f64,
-    stream: u64 }
+    stream: u64,
+    #[serde(default)]
+    frame_count: Option<u64>,
+    #[serde(default)]
+    nominal_fps: f64 }
+impl VideoOrigin {
+    fn bounded_frame(self, index: i64, fps: f64) -> i64 {
+        // Nearest-frame sampling can round the final output sample to N for
+        // an N-picture source. Hold N-1 only for that one boundary, using
+        // matching nominal/average rate metadata; do not mask arbitrary EOFs,
+        // damaged pictures, or timestamps far beyond the video stream.
+        match self.frame_count.filter(|n| *n > 0 && *n <= i64::MAX as u64) {
+            Some(count) if index == count as i64 && (fps-self.nominal_fps).abs() < 0.001 => index-1,
+            _ => index,
+        }
+    }
+}
 static VIDEO_ORIGINS: OnceLock<Mutex<VecDeque<(PathBuf, OriginStamp, VideoOrigin)>>> =
     OnceLock::new();
 fn origin_stamp(path: &Path) -> Option<OriginStamp> {
@@ -400,9 +389,16 @@ fn probe_video_origin(json: &str) -> Result<VideoOrigin, String> {
         .filter(|v| v.as_str() != Some("N/A"))
         .or_else(|| document["format"].get("start_time"));
     let origin = value.map(number_of).unwrap_or(0.0);
+    let nominal = stream["r_frame_rate"].as_str().and_then(parse_rate).unwrap_or(0.0);
+    let average = stream["avg_frame_rate"].as_str().and_then(parse_rate).unwrap_or(0.0);
+    let frame_count = if nominal > 0.0 && (nominal-average).abs() < 0.001 {
+        stream["nb_frames"].as_str().and_then(|n| n.parse::<u64>().ok()).or_else(|| stream["nb_frames"].as_u64())
+    } else { None };
     if origin.is_finite() {
         Ok(VideoOrigin {
             seconds: origin,
+            frame_count,
+            nominal_fps: nominal,
             stream: stream["index"]
                 .as_u64()
                 .ok_or("Missing video stream index")? })
@@ -511,6 +507,7 @@ fn cli_frame_start(
             select: format!("select=gte(n\\,{})", index.max(0)) });
     }
     let clock = video_origin(path, cancel, request)?;
+    let index = clock.bounded_frame(index, fps);
     let (_, time) = seek_window(index, fps);
     Ok(CliFrameStart {
         seek: Some(clock.seconds + time),
@@ -534,6 +531,7 @@ pub fn fitted_size(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32)
 }
 
 struct SeqDec {
+    hardware: bool,
     media_id: u64,
     w: u32,
     h: u32,
@@ -642,6 +640,7 @@ struct PreparedPictureKey {
     segment_dimensions: (u32, u32) }
 
 pub struct CachingSource {
+    hardware_failures: HashMap<u64, std::time::Instant>,
     media: HashMap<u64, Media>,
     cache: HashMap<(u64, i64, u32, u32), ImageBuf>,
     order: VecDeque<(u64, i64, u32, u32)>,
@@ -668,6 +667,7 @@ pub struct CachingSource {
 impl CachingSource {
     pub fn new() -> Self {
         Self {
+            hardware_failures: HashMap::new(),
             media: HashMap::new(),
             cache: HashMap::new(),
             order: VecDeque::new(),
@@ -919,6 +919,7 @@ impl CachingSource {
         self.order.retain(|key| self.cache.contains_key(key));
         self.cache_bytes = self.cache.values().map(|image| image.rgb.len()).sum();
         self.sequences.retain(|seq| unchanged(seq.media_id));
+        self.hardware_failures.retain(|id, _| unchanged(*id));
         self.audio.retain(|id, _| unchanged(*id));
         self.preview_fingerprints.retain(|id, _| unchanged(*id));
         self.fingerprint_checked.retain(|id, _| unchanged(*id));
@@ -1020,11 +1021,17 @@ impl FrameSource for CachingSource {
         } else {
             24.0
         };
-        let index = if media.kind == MediaKind::Still {
+        let mut index = if media.kind == MediaKind::Still {
             0
         } else {
             nearest_source_frame(time_secs, fps)
         };
+        if media.kind != MediaKind::Still && (index > 2 || time_secs >= media.source_duration_seconds()-0.5/fps) {
+            if let Ok(clock) = video_origin(&media.path,
+                self.cancellation.as_ref().map(|guard| guard.flag.as_ref()),self.preview_request.as_deref()) {
+                index = clock.bounded_frame(index,fps);
+            }
+        }
         let key = (media_id, index, w, h);
         if let Some(hit) = self.cache.get(&key).cloned() {
             self.touch(key);
@@ -1255,8 +1262,11 @@ impl CachingSource {
         fps: f64,
         retain_intermediate: bool,
     ) -> Option<Vec<u8>> {
+        let hardware = self.preview_mode && PREVIEW_HARDWARE.load(Ordering::Acquire)
+            && self.hardware_failures.get(&media_id).is_none_or(|at| at.elapsed() >= Duration::from_secs(60));
         let reuse = self.sequences.iter().position(|seq| {
             seq.media_id == media_id
+                && seq.hardware == hardware
                 && seq.w == w
                 && seq.h == h
                 && can_drain_forward(seq.next, index, fps)
@@ -1281,6 +1291,7 @@ impl CachingSource {
                 w,
                 h,
                 self.cancellation.as_ref(),
+                hardware,
             )?
         };
         let active_request = self.cancellation.as_ref().map(|guard| {
@@ -1294,7 +1305,10 @@ impl CachingSource {
                 return None;
             }
             let ordinal = seq.next;
-            seq.read_frame_into(&mut rgb)?;
+            if seq.read_frame_into(&mut rgb).is_none() {
+                if hardware && !self.cancelled() { self.hardware_failures.insert(media_id, std::time::Instant::now()); }
+                return None; // Existing single-frame software path handles this request.
+            }
             if self.cancelled() {
                 return None;
             }
@@ -1372,6 +1386,7 @@ impl SeqDec {
         w: u32,
         h: u32,
         cancellation: Option<&DecodeCancellation>,
+        hardware: bool,
     ) -> Option<Self> {
         if cancellation.is_some_and(|guard| guard.flag.load(Ordering::Acquire)) {
             return None;
@@ -1387,6 +1402,10 @@ impl SeqDec {
         .ok()?;
         let ffmpeg = find_ffmpeg().ok()?;
         let mut command = media_command(&ffmpeg);
+        // No hardware output format: FFmpeg returns software frames for the
+        // existing CPU compositor. Auto supports Radeon, Intel and NVIDIA;
+        // a failed stream retries through the existing software frame path.
+        if hardware { command.args(["-hwaccel", "auto"]); }
         command
             .arg("-nostdin")
             .arg("-hide_banner")
@@ -1413,8 +1432,9 @@ impl SeqDec {
             .arg("-dn")
             .arg("-vf")
             .arg(format!("{},scale={w}:{h}:flags=bilinear", start.select))
-            .arg("-fps_mode")
-            .arg("passthrough")
+            // -vsync 0 also works with distribution FFmpeg 4.4; -fps_mode needs 5.1+.
+            .arg("-vsync")
+            .arg("0")
             .arg("-f")
             .arg("rawvideo")
             .arg("-pix_fmt")
@@ -1438,6 +1458,7 @@ impl SeqDec {
             children.push(Arc::downgrade(&child));
         }
         Some(Self {
+            hardware,
             media_id,
             w,
             h,
@@ -1517,8 +1538,8 @@ fn decode_frame_with_request(
         "1".into(),
         "-vf".into(),
         format!("{},scale={w}:{h}:flags=bilinear", start.select),
-        "-fps_mode".into(),
-        "passthrough".into(),
+        "-vsync".into(),
+        "0".into(),
         "-f".into(),
         "rawvideo".into(),
         "-pix_fmt".into(),
@@ -1550,6 +1571,8 @@ fn decode_frame_with_request(
 pub fn decode_audio(path: &Path) -> Result<Pcm, String> {
     decode_audio_inner(path, None)
 }
+
+
 
 fn decode_audio_inner(path: &Path, cancel: Option<&AtomicBool>) -> Result<Pcm, String> {
     let ffmpeg = find_ffmpeg()?;
@@ -1652,4 +1675,3 @@ pub(super) fn decode_audio_window(
 pub fn write_rgb_pipe(stdin: &mut impl Write, rgb: &[u8]) -> Result<(), String> {
     stdin.write_all(rgb).map_err(|err| err.to_string())
 }
-

@@ -997,7 +997,7 @@ fn prepare(root: &Path, job: &Job, cancel: &AtomicBool, allowance: u64) -> Resul
     let json = run(&probe, &[
         "-v".into(), "error".into(), "-select_streams".into(), "v:0".into(),
         "-read_intervals".into(), interval, "-show_frames".into(), "-show_streams".into(),
-        "-show_entries".into(), "stream=start_time,r_frame_rate,avg_frame_rate,color_transfer:stream_side_data=rotation:frame=best_effort_timestamp_time,interlaced_frame".into(),
+        "-show_entries".into(), "stream=start_time,r_frame_rate,avg_frame_rate,color_transfer:stream_side_data_list:frame=best_effort_timestamp_time,interlaced_frame".into(),
         "-of".into(), "json".into(), media.path.display().to_string(),
     ], cancel)?;
     let document: serde_json::Value = serde_json::from_slice(&json).map_err(|e| e.to_string())?;
@@ -1072,7 +1072,7 @@ fn prepare(root: &Path, job: &Job, cancel: &AtomicBool, allowance: u64) -> Resul
             "-c:v".into(),"mjpeg".into(),"-q:v".into(),"3".into(),"-threads".into(),"2".into(),
             "-pix_fmt".into(),"yuvj444p".into(),"-color_range".into(),"pc".into(),"-colorspace".into(),"bt709".into(),
             "-fs".into(),allowance.to_string(),
-            "-fps_mode".into(),"passthrough".into(),"-f".into(),"matroska".into(),partial.display().to_string()
+            "-vsync".into(),"0".into(),"-f".into(),"matroska".into(),partial.display().to_string()
         ],cancel)?;
         let check = run(
             &probe,

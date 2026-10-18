@@ -9,6 +9,11 @@ mod export_form;
 mod export_destination;
 mod media_selection;
 mod media_import;
+mod engine_setup;
+mod batch_relink;
+mod motion;
+mod review;
+mod collab;
 
 use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
@@ -35,7 +40,7 @@ use crate::project::{
     Project, ShortcutProfile, SourceRange, SourceTime, TrackKind };
 use crate::shortcuts::{self, Command, Mods};
 use crate::source::SourceTransport;
-use crate::timeline::{self, frame_at, hit_rows, layout_rows, Edge, Hit, Tool, TrackRow};
+use crate::timeline::{self, frame_at, hit_layout, layout_rows_with_density, Edge, Hit, Tool, TrackRow};
 use crate::transitions::transition_window;
 
 struct Pointer {
@@ -79,12 +84,14 @@ struct TimelineViewKey {
     zoom: u64,
     scroll: u64,
     width: u32,
-    height: u32 }
+    height: u32,
+    density: i32 }
 
 impl TimelineViewKey {
-    fn capture(project: &Project, revision: u64, width: f32, height: f32) -> Self {
+    fn capture(project: &Project, revision: u64, width: f32, height: f32, density: i32) -> Self {
         Self {
             revision,
+            density,
             zoom: project.sequence.zoom.to_bits(),
             scroll: project.sequence.scroll.to_bits(),
             width: width.to_bits(),
@@ -150,6 +157,10 @@ struct PendingInsert {
     format: (u32, u32, FrameRate) }
 
 struct AppState {
+    collaboration: collab::State,
+    batch_relink: batch_relink::Search,
+    recovery: Option<crate::recovery::Recovery>,
+    engine_setup: engine_setup::Setup,
     optimized_cache: Arc<playback::optimized::OptimizedCache>,
     preview_cache_status_at: Instant,
     background_idle_after: Instant,
@@ -314,6 +325,10 @@ impl AppState {
         preview.set_optimized_cache(Some(optimized_cache.clone()));
         source_preview.set_optimized_cache(Some(optimized_cache.clone()));
         Self {
+            collaboration: collab::State::default(),
+            batch_relink: batch_relink::Search::default(),
+            recovery: None,
+            engine_setup: engine_setup::Setup::default(),
             optimized_cache,
             preview_cache_status_at: Instant::now() - std::time::Duration::from_secs(2),
             background_idle_after: Instant::now(),
@@ -458,8 +473,38 @@ pub fn run() -> anyhow::Result<()> {
                 Err(error) => state.borrow_mut().status = error }
         }
     }
+    if state.borrow().live.is_none() {
+        match crate::recovery::Recovery::new() {
+            Ok(mut recovery) => {
+                for candidate in crate::recovery::candidates() {
+                    let answer = rfd::MessageDialog::new().set_title("Recover unsaved edits")
+                        .set_description(format!("An interrupted session has unsaved edits to '{}'.\n\nRecover opens a working copy and preserves the saved project.\n\n{}", candidate.session.project.name, candidate.path.display()))
+                        .set_buttons(rfd::MessageButtons::YesNoCancel).show();
+                    match answer {
+                        rfd::MessageDialogResult::Yes => {
+                            let mut session = candidate.session.clone(); session.path = None; session.dirty = true;
+                            match timeline::Editor::from_session(session.clone()).and_then(|editor| recovery.adopt(&session).map(|()| editor)) {
+                                Ok(editor) => {
+                                    let mut current = state.borrow_mut(); current.editor = editor;
+                                    current.status = "Recovered unsaved edits. Save As to keep this working copy.".into();
+                                    let _ = candidate.dismiss();
+                                },
+                                Err(error) => state.borrow_mut().status = format!("Recovery: {error}"),
+                            }
+                            break;
+                        },
+                        rfd::MessageDialogResult::No => { let _ = candidate.dismiss(); },
+                        _ => break, // Leave snapshots available for the next launch.
+                    }
+                }
+                state.borrow_mut().recovery = Some(recovery);
+            },
+            Err(error) => state.borrow_mut().status = format!("Recovery unavailable: {error}"),
+        }
+    }
     set_preview_default(&ui, &state);
     wire(&ui, &state);
+    engine_setup::check(&ui, &state);
     ui.set_app_version(SharedString::from(crate::update::CURRENT_VERSION));
     ui.set_version_rows(model(Vec::<VersionRow>::new()));
     start_background_update_check(&ui, &state);
@@ -472,7 +517,13 @@ pub fn run() -> anyhow::Result<()> {
         full_sync(&ui, &state);
         live::restore_ui_after_sync(&ui, &state);
     }
-    if std::env::args().any(|arg| arg == "--show-commands") {
+    if std::env::args().any(|arg| arg == "--show-review") {
+        on_command(&ui, &state, "review");
+    } else if std::env::args().any(|arg| arg == "--show-activity") {
+        on_command(&ui, &state, "activity");
+    } else if std::env::args().any(|arg| arg == "--show-engine-setup") {
+        ui.set_show_engine_setup(true);
+    } else if std::env::args().any(|arg| arg == "--show-commands") {
         on_command(&ui, &state, "commands");
     } else if std::env::args().any(|arg| arg == "--show-preferences") {
         on_command(&ui, &state, "preferences");
@@ -607,6 +658,7 @@ fn wire(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
             if !confirm_unsaved(&ui, &close_state) {
                 return slint::CloseRequestResponse::KeepWindowShown;
             }
+            if let Some(recovery) = &mut close_state.borrow_mut().recovery { recovery.clean(); }
             close_state.borrow().audio.stop();
             persist_current_layout(&ui, &close_state);
             close_state
@@ -943,6 +995,7 @@ fn on_key(
     }
     if ui.get_modal_open() {
         if key == "escape" {
+            ui.set_show_engine_setup(false);
             ui.set_show_dialog(false);
             ui.set_show_prefs(false);
             ui.set_show_about(false);
@@ -1096,6 +1149,7 @@ fn viewer_action(id: &str) -> bool {
 }
 
 fn action_enabled(ui: &AppWindow, state: &AppState, id: &str) -> bool {
+    if collab::active(state) { if id == "undo" { return collab::can_undo(state); } if id == "redo" { return collab::can_redo(state); } }
     match id {
         "undo" => return state.editor.can_undo(),
         "redo" => return state.editor.can_redo(),
@@ -1412,7 +1466,7 @@ fn reveal_track(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, explic
         });
         track
             .and_then(|track| {
-                layout_rows(&current.editor.project.sequence, current.track_body)
+                rows_for(&current)
                     .into_iter()
                     .find(|row| row.track_index == track)
             })
@@ -1436,6 +1490,25 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
     // The update function exits after launching its helper. Keep the modal up
     // until it returns so no edits can race that exit after the unsaved guard.
     if state.borrow().update_applying { return; }
+    if let Some(value) = command.strip_prefix("track-density:").and_then(|v| v.parse::<i32>().ok()).filter(|v| (0..=3).contains(v)) {
+        if ui.get_modal_open() || ui.get_live_reloading() || state.borrow().pointer.down { return; }
+        {
+            let mut current = state.borrow_mut();
+            current.preferences.track_density = value;
+            current.timeline_view_key = None; current.waveform_view_key = None;
+            current.edit_hover_key = None; current.razor_hover_key = None;
+        }
+        save_preferences(state);
+        full_sync(ui,state);
+        reveal_track(ui,state,None);
+        return;
+    }
+    if command == "activity" { ui.set_show_activity(!ui.get_show_activity()); ui.set_show_review(false); ui.set_show_session(false); return; }
+    if collab::handle(ui,state,command) { return; }
+    if collab::readonly(&state.borrow()) && matches!(command,"insert"|"overwrite"|"paste"|"split"|"ripple-delete"|"lift-delete"|"lift"|"delete"|"nudge-left"|"nudge-right"|"nudge-left-10"|"nudge-right-10"|"track-up"|"track-down"|"link-clips"|"unlink-clips"|"reset-motion"|"reset-grade"|"remove-transition"|"review-add"|"review-import"|"import"|"import-timeline"|"relink-missing") { set_status(state,"This session is read-only. Leave it to edit a local copy.".into()); return; }
+    if engine_setup::handle(ui, state, command) { return; }
+    if !ui.get_live_reloading() && !ui.get_modal_open() && review::handle(ui, state, command) { return; }
+    if command == "relink-missing" { batch_relink::start(ui, state); return; }
     if matches!(command, "export-form-changed" | "browse-export" | "choose-export-folder"
         | "render" | "add-to-queue" | "render-queue" | "preset-high" | "preset-medium"
         | "preset-fast" | "preset-compact" | "preset-match") && export_form::guard(ui, state) { return; }
@@ -1973,6 +2046,7 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
                                 clip.pos_x = 0.0;
                                 clip.pos_y = 0.0;
                                 clip.scale = 1.0;
+                                clip.transform = Default::default();
                             }
                             "reset-opacity" => clip.opacity = 1.0,
                             _ => clip.grade = Grade::default(),
@@ -1995,6 +2069,7 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
                 live::close(ui, state);
                 Some(())
             } else if confirm_unsaved(ui, state) {
+                if let Some(recovery) = &mut state.borrow_mut().recovery { recovery.clean(); }
                 persist_current_layout(ui, state);
                 state.borrow().audio.stop();
                 state.borrow().export_cancel.store(true, Ordering::Relaxed);
@@ -2065,10 +2140,12 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             Some(())
         }
         Command::PlayPause => {
+            if !engine_setup::require(ui, state) { return; }
             toggle_play(state);
             Some(())
         }
         Command::ShuttleReverse => {
+            if !engine_setup::require(ui, state) { return; }
             shuttle(state, -1.0);
             Some(())
         }
@@ -2077,6 +2154,7 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             Some(())
         }
         Command::ShuttleForward => {
+            if !engine_setup::require(ui, state) { return; }
             shuttle(state, 1.0);
             Some(())
         }
@@ -2165,6 +2243,11 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             Some(())
         }
         Command::Escape => {
+            ui.set_show_review(false);
+            ui.set_show_activity(false);
+            ui.set_show_session(false);
+            batch_relink::cancel(state);
+            ui.set_show_engine_setup(false);
             let dismissing_popup = ui.get_modal_open() || ui.get_open_menu() != 0
                 || ui.get_show_command_palette();
             ui.set_show_dialog(false);
@@ -2504,6 +2587,7 @@ fn clip_adjustment_target(editor: &timeline::Editor, audio: bool) -> Result<u64,
 }
 
 fn on_adjust(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, field: &str, value: f32) {
+    if field != "crf" && collab::readonly(&state.borrow()) { full_sync(ui,state); return; }
     if state.borrow().syncing {
         return;
     }
@@ -2543,6 +2627,7 @@ fn on_adjust(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, field: &s
         return;
     }
     state.borrow_mut().editor.adjust(field, value);
+    motion::sync(ui, &state.borrow().editor);
     match field {
         "pos-x" => ui.set_read_pos_x(SharedString::from(format!("{}", value.round() as i32))),
         "pos-y" => ui.set_read_pos_y(SharedString::from(format!("{}", value.round() as i32))),
@@ -2675,7 +2760,7 @@ fn sync_razor_hover(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     if current.razor_hover_key == Some(key) { return; }
     let px = sequence.zoom as f32;
     let frame = frame_at(x, sequence.scroll as f32, px).max(0);
-    let hit = hit_rows(sequence, x, y + scroll_y, px, sequence.scroll as f32, current.track_body);
+    let hit = hit_layout(sequence, x, y + scroll_y, px, sequence.scroll as f32, &rows_for(&current));
     let mut guides = Vec::new();
     let (frame, reason, count) = if let Hit::Clip { id, .. } = hit {
         let plan = current.editor.razor_plan(id, frame, (6.0 / px.max(0.05)).round() as i64);
@@ -2719,7 +2804,7 @@ fn sync_edit_feedback(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) 
     // stationary hover honest when a newly selected clip cannot be moved.
     if current.edit_hover_key == Some(key)
         && current.edit_hover_selection == current.editor.selected_clips { return; }
-    let hit = hit_rows(seq, x, y + scroll_y, seq.zoom as f32, seq.scroll as f32, current.track_body);
+    let hit = hit_layout(seq, x, y + scroll_y, seq.zoom as f32, seq.scroll as f32, &rows_for(&current));
     let feedback = current.pointer.down.then(|| current.editor.gesture_feedback.as_ref()).flatten();
     let mut guides = Vec::new();
     let mut text = String::new();
@@ -2790,6 +2875,15 @@ fn on_timeline(
     y: f32,
     shift: bool,
 ) {
+    if collab::readonly(&state.borrow()) && zone == 1 {
+        if phase == 0 {
+            let mut s=state.borrow_mut();let seq=&s.editor.project.sequence;
+            let hit=hit_layout(seq,x,y+ui.get_timeline_scroll_y(),seq.zoom as f32,seq.scroll as f32,&rows_for(&s));
+            if let Hit::Clip{id,..}=hit{s.editor.select_only(id,ui.get_linked_on());}
+            drop(s);full_sync(ui,state);
+        }
+        return;
+    }
     if zone == 1 { state.borrow_mut().razor_hover = (phase != 3).then_some((x, y)); }
     if phase == 0 || state.borrow().pointer.down { state.borrow().filmstrips.set_busy(true); }
     // UI pointer coordinates are relative to the visible track viewport.
@@ -2805,7 +2899,7 @@ fn on_timeline(
     }
     if phase == 0 {
         stop_play(state);
-        let (tool, armed, sequence, px, scroll, body) = {
+        let (tool, armed, sequence, px, scroll, _body) = {
             let state = state.borrow();
             (
                 state.editor.tool,
@@ -2841,7 +2935,7 @@ fn on_timeline(
             full_sync(ui, state);
             return;
         }
-        let hit = hit_rows(&sequence, x, y, px, scroll, body);
+        let hit = hit_layout(&sequence, x, y, px, scroll, &rows_for(&state.borrow()));
         if tool == Tool::Razor {
             if let Hit::Clip { id, .. } = hit {
                 let mut state = state.borrow_mut();
@@ -3471,6 +3565,19 @@ fn take_export_progress(rx: &Receiver<ExportProgress>) -> Option<ExportProgress>
 }
 
 fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    collab::pump(ui,state);
+    engine_setup::pump(ui, state);
+    batch_relink::pump(ui, state);
+    {
+        let mut current = state.borrow_mut();
+        let mut recovery = current.recovery.take();
+        if let Some(recovery) = &mut recovery {
+            if let Some(error) = recovery.tick(&current.editor, current.edit_gen, current.pointer.down || current.import_rx.is_some()) {
+                current.status = error; ui.set_status_text(current.status.clone().into());
+            }
+        }
+        current.recovery = recovery;
+    }
     export_form::pump(ui, state);
     audio_mix::sync_meters(ui, state);
     {
@@ -4135,6 +4242,7 @@ fn light_sync(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
             guard.edit_gen,
             guard.timeline_w,
             guard.track_body,
+            guard.preferences.track_density,
         )
     };
     if state.borrow().timeline_view_key != Some(key) {
@@ -4145,6 +4253,7 @@ fn light_sync(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
         ui.set_clips(model(clips));
         ui.set_trans(model(transitions));
         ui.set_ticks(model(ticks));
+        review::sync_markers(ui, &state.borrow());
         state.borrow_mut().timeline_view_key = Some(key);
     }
     ui.set_can_split(editing_availability(&state.borrow().editor).1);
@@ -4347,6 +4456,7 @@ fn start_source_audio(current: &mut AppState) {
 }
 
 fn on_source_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, action: &str) {
+    if matches!(action,"play-toggle"|"shuttle-j"|"shuttle-l") && !engine_setup::require(ui,state) { return; }
     pump_source_preview(ui, state);
     let selected = {
         let current = state.borrow();
@@ -4510,6 +4620,9 @@ fn wheel_text(value: f32) -> SharedString {
 }
 
 fn full_sync(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    ui.set_track_density(state.borrow().preferences.track_density.clamp(0,3));
+    review::sync(ui, &state.borrow());
+    motion::sync(ui, &state.borrow().editor);
     sync_media_selection(&mut state.borrow_mut());
     sync_import_ui(ui, &state.borrow());
     {
@@ -4784,8 +4897,10 @@ fn full_sync(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
         current.edit_gen,
         current.timeline_w,
         current.track_body,
-    ));
+        current.preferences.track_density,
+        ));
     current.syncing = false;
+    collab::sync(ui,&current);
 }
 
 struct SyncSnap {
@@ -5116,7 +5231,7 @@ fn bin_views(state: &AppState) -> Vec<BinItem> {
 }
 
 fn rows_for(state: &AppState) -> Vec<TrackRow> {
-    layout_rows(&state.editor.project.sequence, state.track_body)
+    layout_rows_with_density(&state.editor.project.sequence, state.track_body, state.preferences.track_density)
 }
 
 fn refresh_tracks(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
@@ -5338,6 +5453,7 @@ fn source_project(media: &Media) -> Project {
         let track = project.add_track(kind);
         let id = project.alloc();
         project.sequence.tracks[track].clips.push(Clip {
+            transform: Default::default(),
             id,
             media_id,
             name: media.name.clone(),
@@ -5778,6 +5894,7 @@ fn ensure_extension(path: PathBuf, ext: &str) -> PathBuf {
 }
 
 fn relink_media(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    if !engine_setup::require(ui, state) { return; }
     if state.borrow().import_rx.is_some() {
         set_status(
             state,
@@ -6188,6 +6305,10 @@ fn handle_dropped_files(
 
 fn import_paths(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, paths: Vec<PathBuf>) {
     if paths.is_empty() { return; }
+    if !engine_setup::require(ui, state) {
+        state.borrow_mut().engine_setup.deferred_paths = paths.into_iter().take(media_import::MAX_ROOTS).collect();
+        return;
+    }
     {
         let mut current = state.borrow_mut();
         current.query.clear();
@@ -6537,6 +6658,7 @@ fn launch_next_export(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) 
 }
 
 fn launch_export_job(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, id: i32) {
+    if !engine_setup::require(ui, state) { return; }
     stop_play(state);
     let (project, settings) = {
         let mut current = state.borrow_mut();

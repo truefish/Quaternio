@@ -4,14 +4,17 @@
 )]
 
 mod cli;
+mod collaboration;
 mod color;
 mod commands;
 mod export;
 mod import;
 mod live_preview;
+mod media_engine;
 mod platform_drag_drop;
 mod playback;
 mod preferences;
+mod recovery;
 mod project;
 mod shortcuts;
 mod source;
@@ -22,6 +25,11 @@ mod update;
 mod app;
 
 fn main() {
+    match media_engine::run_if_requested() {
+        Ok(true) => return,
+        Ok(false) => {},
+        Err(error) => { eprintln!("Media engine: {error}"); std::process::exit(1); },
+    }
     match export::worker::run_if_requested() {
         Ok(true) => return,
         Ok(false) => {}

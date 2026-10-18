@@ -38,6 +38,9 @@ global Palette {
     out property <color> guide: #C8CDD6;
 }
 
+export struct PeerItem { id: string, name: string, role: string, state: string, revocable: bool, }
+export struct ReviewMarker { id: string, x: float, resolved: bool, }
+export struct ReviewItem { id: string, timecode: string, author: string, text: string, resolved: bool, }
 export struct BinItem { id: int, name: string, kind: string, info: string, selected: bool, tc-in: string, tc-out: string, duration: string, fps: string, offline: bool, thumbnail: image, }
 export struct CommandItem { action: string, label: string, hint: string, enabled: bool, }
 export struct KeyBindingRow { action: string, label: string, binding: string, modified: bool, }
@@ -1296,6 +1299,17 @@ component ToolBtn inherits Rectangle {
     }
 }
 
+component ConnectionText inherits Rectangle {
+    in-out property <string> value;
+    in property <bool> read-only: false;
+    height: 76px; background: Palette.bg0; border-radius: 3px; border-width: 1px; border-color: input.has-focus ? Palette.accent : Palette.bg3; clip: true;
+    input := TextInput { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px;
+        text <=> root.value; read-only: root.read-only; single-line: false; wrap: char-wrap; font-size: 12px; color: Palette.text-primary;
+        changed has-focus => { if (self.has-focus) { LiveFocus.input-gained(); } else { LiveFocus.input-lost(); } }
+        Timer { interval: 150ms; running: input.has-focus; triggered => { LiveFocus.heartbeat(); } }
+    }
+}
+
 export component AppWindow inherits Window {
     title: root.window-title + (root.live-preview ? " · Live" : "");
     icon: @image-url("icons/quaternio.png");
@@ -1528,6 +1542,7 @@ export component AppWindow inherits Window {
     in-out property <float> export-crf: 21;
     in-out property <int> export-speed: 0;
     in-out property <int> export-encoder: 0;
+    in-out property <string> export-amd-adapter: "";
     in property <string> read-crf: "21";
     in property <float> export-progress: 0;
     in property <bool> export-preparing: false;
@@ -1591,6 +1606,17 @@ export component AppWindow inherits Window {
     in-out property <bool> basic-open: true;
     in-out property <bool> wheels-open: false;
     property <bool> motion-open: true;
+    in-out property <float> motion-rotation: 0;
+    in-out property <float> motion-scale-x: 1;
+    in-out property <float> motion-scale-y: 1;
+    in-out property <float> motion-anchor-x: 0.5;
+    in-out property <float> motion-anchor-y: 0.5;
+    in-out property <float> motion-crop-left: 0;
+    in-out property <float> motion-crop-right: 0;
+    in-out property <float> motion-crop-top: 0;
+    in-out property <float> motion-crop-bottom: 0;
+    in property <bool> motion-flip-x: false;
+    in property <bool> motion-flip-y: false;
     property <bool> opacity-open: true;
     in-out property <bool> linked-on: true;
     in-out property <bool> ripple-on: false;
@@ -1603,7 +1629,43 @@ export component AppWindow inherits Window {
     property <string> export-details: "";
     out property <bool> modal-open: root.show-dialog || root.show-prefs || root.show-about
         || root.show-import-mode || root.show-import-report || root.show-update-agree
-        || root.show-sequence-match || root.capturing-binding || root.show-export-details;
+        || root.show-sequence-match || root.capturing-binding || root.show-export-details || root.show-engine-setup;
+    in-out property <bool> show-session: false;
+    in-out property <bool> session-show-codes: false;
+    in-out property <bool> session-show-recovery: false;
+    in property <bool> session-connected: false;
+    in property <bool> session-active: false;
+    in property <bool> session-host: false;
+    in property <bool> session-readonly: false;
+    in property <bool> session-has-branch: false;
+    in property <string> session-status;
+    in property <string> session-revision;
+    in property <string> session-code;
+    in property <string> session-issues;
+    in property <[PeerItem]> session-peers;
+    in-out property <string> session-input;
+    in-out property <string> session-name: "Editor";
+    in-out property <string> session-invitee: "Collaborator";
+    in-out property <bool> session-editor-role: true;
+    in property <int> track-density: 0;
+    in-out property <bool> show-activity: false;
+    in-out property <bool> show-review: false;
+    in-out property <bool> review-show-resolved: false;
+    in-out property <string> review-author;
+    in-out property <string> review-query;
+    in-out property <int> review-page: 0;
+    in property <int> review-pages: 1;
+    in-out property <string> review-draft;
+    in property <string> review-error;
+    in property <string> review-summary;
+    in property <[ReviewItem]> review-notes;
+    in property <[ReviewMarker]> review-markers;
+    in-out property <bool> show-engine-setup: false;
+    in property <bool> engine-busy: false;
+    in property <bool> engine-ready: false;
+    in property <string> engine-details;
+    in property <bool> preview-hardware: true;
+    in property <string> engine-status: "Checking media engine…";
     changed modal-open => { if (root.modal-open) { root.open-menu = 0; ToolHints.shown = false; } }
     in property <bool> update-available: false;
     in property <string> update-tooltip: "";
@@ -1825,6 +1887,9 @@ export component AppWindow inherits Window {
                     Rectangle { width: 8px; }
                     Text { text: root.save-label; color: Palette.text-secondary; font-size: 11px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
+                    TextBtn { label: root.session-active ? "Session ●" : "Collaborate"; tooltip: "Host or join a live peer session"; clicked => { root.command("session"); } }
+                    TextBtn { label: "Activity"; tooltip: "Imports, exports, previews and media setup"; clicked => { root.command("activity"); } }
+                    TextBtn { label: "Review"; tooltip: "Timecoded notes and review"; clicked => { root.command("review"); } }
                     TextBtn { label: "Import…"; tooltip: "Add media · " + root.shortcut-hint("import", root.shortcut-revision); clicked => { root.command("import"); } }
                     TextBtn { label: "Save"; tooltip: "Save project · " + root.shortcut-hint("save", root.shortcut-revision); clicked => { root.command("save"); } }
                     IconBtn { icon: @image-url("icons/search.svg"); tooltip: "Search commands · " + root.shortcut-hint("commands", root.shortcut-revision); clicked => { root.command-query = ""; root.show-command-palette = true; } }
@@ -2025,8 +2090,21 @@ export component AppWindow inherits Window {
                                             NumRow { focused => { root.active-panel = 4; } label: "Position X"; read: root.read-pos-x; value <=> root.pos-x; minimum: -4096; maximum: 4096; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("pos-x", v); } }
                                             NumRow { focused => { root.active-panel = 4; } label: "Position Y"; read: root.read-pos-y; value <=> root.pos-y; minimum: -4096; maximum: 4096; bipolar: true; changed(v) => { root.active-panel = 4; root.adjust("pos-y", v); } }
                                             NumRow { focused => { root.active-panel = 4; } label: "Scale"; read: root.read-scale; value <=> root.scale-v; minimum: 0.01; maximum: 4; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("scale", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Rotation"; read: "" + (round(root.motion-rotation * 1 * 100) / 100) + "°"; value <=> root.motion-rotation; minimum: -360; maximum: 360; display-scale: 1; changed(v) => { root.active-panel = 4; root.adjust("rotation", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Scale X"; read: "" + (round(root.motion-scale-x * 100 * 100) / 100) + "%"; value <=> root.motion-scale-x; minimum: 0.01; maximum: 10; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("scale-x", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Scale Y"; read: "" + (round(root.motion-scale-y * 100 * 100) / 100) + "%"; value <=> root.motion-scale-y; minimum: 0.01; maximum: 10; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("scale-y", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Anchor X"; read: "" + (round(root.motion-anchor-x * 100 * 100) / 100) + "%"; value <=> root.motion-anchor-x; minimum: 0; maximum: 1; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("anchor-x", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Anchor Y"; read: "" + (round(root.motion-anchor-y * 100 * 100) / 100) + "%"; value <=> root.motion-anchor-y; minimum: 0; maximum: 1; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("anchor-y", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Crop left"; read: "" + (round(root.motion-crop-left * 100 * 100) / 100) + "%"; value <=> root.motion-crop-left; minimum: 0; maximum: 1; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("crop-left", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Crop right"; read: "" + (round(root.motion-crop-right * 100 * 100) / 100) + "%"; value <=> root.motion-crop-right; minimum: 0; maximum: 1; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("crop-right", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Crop top"; read: "" + (round(root.motion-crop-top * 100 * 100) / 100) + "%"; value <=> root.motion-crop-top; minimum: 0; maximum: 1; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("crop-top", v); } }
+                                            NumRow { focused => { root.active-panel = 4; } label: "Crop bottom"; read: "" + (round(root.motion-crop-bottom * 100 * 100) / 100) + "%"; value <=> root.motion-crop-bottom; minimum: 0; maximum: 1; display-scale: 100; changed(v) => { root.active-panel = 4; root.adjust("crop-bottom", v); } }
+                                            HorizontalLayout { padding: 8px; spacing: 8px;
+                                                SecBtn { label: root.motion-flip-x ? "Unflip horizontal" : "Flip horizontal"; clicked => { root.adjust("flip-x", root.motion-flip-x ? 0 : 1); } }
+                                                SecBtn { label: root.motion-flip-y ? "Unflip vertical" : "Flip vertical"; clicked => { root.adjust("flip-y", root.motion-flip-y ? 0 : 1); } }
+                                            }
                                             HorizontalLayout { padding: 8px; alignment: start;
-                                                TextBtn { label: "Reset motion"; tooltip: "Reset position and scale as one undoable edit"; clicked => { root.active-panel = 4; root.command("reset-motion"); } }
+                                                TextBtn { label: "Reset motion"; tooltip: "Reset position, scale, rotation, anchor, crop and flips as one undoable edit"; clicked => { root.active-panel = 4; root.command("reset-motion"); } }
                                             }
                                         }
                                         FoldHead { label: "Opacity"; open: root.opacity-open; focused => { root.active-panel = 4; } toggled => { root.opacity-open = !root.opacity-open; } }
@@ -2218,6 +2296,10 @@ export component AppWindow inherits Window {
                                     IconBtn { icon: @image-url("icons/prev-edit.svg"); tooltip: "Previous edit · " + root.shortcut-hint("prev-edit", root.shortcut-revision) + "\nMove the playhead to the previous clip edge." + (root.has-clips ? "" : "\nAdd clips to the timeline first."); enabled: root.has-clips; clicked => { root.active-panel = 3; keys.focus(); root.command("prev-edit"); } }
                                     IconBtn { icon: @image-url("icons/next-edit.svg"); tooltip: "Next edit · " + root.shortcut-hint("next-edit", root.shortcut-revision) + "\nMove the playhead to the next clip edge." + (root.has-clips ? "" : "\nAdd clips to the timeline first."); enabled: root.has-clips; clicked => { root.active-panel = 3; keys.focus(); root.command("next-edit"); } }
                                     IconBtn { icon: @image-url("icons/zoom-out.svg"); tooltip: "Zoom out · " + root.shortcut-hint("zoom-out", root.shortcut-revision) + "\nShow more time in the timeline."; clicked => { root.active-panel = 3; keys.focus(); root.command("zoom-out"); } }
+                                    ChoiceButton { width: 28px; icon: @image-url("icons/list.svg"); tooltip: "Track height";
+                                        choices: [{text: "Automatic track height"}, {text: "Compact tracks"}, {text: "Medium tracks"}, {text: "Large tracks"}];
+                                        selected: root.track-density; chosen(index) => { root.command("track-density:" + index); }
+                                    }
                                     Text { text: root.zoom-label; width: 40px; color: Palette.text-secondary; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
                                     IconBtn { icon: @image-url("icons/zoom-in.svg"); tooltip: "Zoom in · " + root.shortcut-hint("zoom-in", root.shortcut-revision) + "\nInspect a shorter range of the timeline."; clicked => { root.active-panel = 3; keys.focus(); root.command("zoom-in"); } }
                                     IconBtn { icon: @image-url("icons/fit.svg"); tooltip: "Fit sequence · " + root.shortcut-hint("zoom-fit", root.shortcut-revision) + "\nShow the full sequence in the timeline."; clicked => { root.active-panel = 3; keys.focus(); root.command("zoom-fit"); } }
@@ -2239,6 +2321,11 @@ Rectangle { height: 20px; background: Palette.bg0; clip: true;
                                         pointer-event(event) => { root.active-panel = 3; keys.focus(); if (event.kind == PointerEventKind.down) { root.timeline(0, 0, self.mouse-x / 1px, self.mouse-y / 1px, event.modifiers.shift, event.modifiers.control); } if (event.kind == PointerEventKind.up) { root.timeline(0, 2, self.mouse-x / 1px, self.mouse-y / 1px, event.modifiers.shift, event.modifiers.control); } if (event.kind == PointerEventKind.cancel) { root.timeline(0, 3, self.mouse-x / 1px, self.mouse-y / 1px, false, false); } }
                                         moved => { if (self.pressed) { root.timeline(0, 1, self.mouse-x / 1px, self.mouse-y / 1px, false, false); } }
                                         scroll-event(event) => { root.wheel(event.delta-y / 1px, self.mouse-x / 1px, event.modifiers.control); accept }
+                                    }
+                                    for note in root.review-markers: Rectangle {
+                                        x: note.x * 1px - 3px; y: 13px; width: 6px; height: 7px;
+                                        background: note.resolved ? Palette.text-disabled : Palette.accent; border-radius: 1px;
+                                        LiveTouchArea { mouse-cursor: pointer; clicked => { root.command("review-jump:" + note.id); } }
                                     }
                                 }
                             }
@@ -2524,9 +2611,13 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                                 Text { text: root.export-speed == 1 ? "Faster encoding can create larger files." : root.export-speed == 2 ? "Better compression takes longer and can reduce file size." : "Higher picture quality usually creates larger files."; color: Palette.text-secondary; font-size: 11px; wrap: word-wrap; }
                                 VerticalLayout { spacing: 4px;
                                     ExportLabel { text: "Encoder"; }
-                                    ChoiceButton { height: 32px; choices: [{text: "Auto · recommended"}, {text: "Software · CPU"}, {text: "Hardware · GPU required"}]; selected: root.export-encoder; enabled: !root.export-busy; chosen(index) => { root.export-encoder = index; root.command("export-form-changed"); } }
+                                    ChoiceButton { height: 32px; choices: [{text: "Auto · recommended"}, {text: "Software · CPU"}, {text: "Hardware · GPU required"}, {text: "AMD · Radeon required"}]; selected: root.export-encoder; enabled: !root.export-busy; chosen(index) => { root.export-encoder = index; root.command("export-form-changed"); } }
                                 }
-                                Text { text: root.export-encoder == 1 ? "Uses the CPU. Quality uses CRF " + root.export-crf + "." : root.export-encoder == 2 ? "Requires a working GPU encoder. Stops with an error if unavailable." : "Uses a working GPU encoder when available; falls back to CPU if needed."; color: Palette.text-secondary; font-size: 11px; wrap: word-wrap; }
+                                Text { text: root.export-encoder == 1 ? "Uses the CPU. Quality uses CRF " + root.export-crf + "." : root.export-encoder == 3 ? "Requires AMD AMF on Windows or an AMD VAAPI device on Linux. GPU decode/resize is probed separately; effects may use the CPU." : root.export-encoder == 2 ? "Requires a working GPU encoder. Stops with an error if unavailable." : "Uses a working GPU encoder when available; falls back to CPU if needed."; color: Palette.text-secondary; font-size: 11px; wrap: word-wrap; }
+                                if root.export-encoder == 3: VerticalLayout { spacing: 4px;
+                                    ExportLabel { text: "Windows adapter index (blank = automatic)"; }
+                                    Field { value <=> root.export-amd-adapter; enabled: !root.export-busy; edited => { root.command("export-form-changed"); } }
+                                }
                                 Text { text: "Audio follows the timeline mix · 48 kHz · 192 kbps"; color: Palette.text-secondary; font-size: 11px; wrap: word-wrap; }
                             }
                         }
@@ -2572,7 +2663,7 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
             Rectangle { height: 22px; background: Palette.bg2; border-radius: 0px;
                 HorizontalLayout { padding-left: 8px; padding-right: 8px; spacing: 12px;
                     Text { text: root.sequence-label; color: Palette.text-primary; font-size: 11px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; }
-                    if root.show-status-extra && !root.import-busy: Text { text: root.playback-label; color: Palette.text-secondary; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
+                    if !root.import-busy: Text { visible: root.show-status-extra; text: root.playback-label; color: Palette.text-secondary; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
                     if !root.import-busy: Rectangle { width: root.preview-cache-status == "" ? 90px : 170px;
                         Text { width: parent.width - (root.preview-cache-status != "" && root.preview-cache-auto ? 62px : 0px); height: 100%; text: root.preview-cache-status == "" ? root.cache-label : root.preview-cache-label; color: Palette.text-secondary; font-size: 11px; vertical-alignment: center; overflow: elide; }
                         LiveTouchArea {
@@ -2594,7 +2685,7 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                     if root.live-preview: Text {
                         text: root.live-status == "" ? "Live" : root.live-status;
                         color: root.live-update-blocked ? Palette.status-warning : root.live-update-pending ? Palette.accent : Palette.text-secondary;
-                        font-size: 11px; width: min(360px, root.width * 0.27);
+                        font-size: 11px; width: 280px;
                         horizontal-alignment: right; vertical-alignment: center; overflow: elide;
                     }
                     Text { text: root.app-version; color: Palette.text-disabled; font-size: 11px; horizontal-alignment: left; vertical-alignment: center; }
@@ -2805,6 +2896,191 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
             }
         }
         if root.show-dialog || root.show-prefs || root.show-about || root.show-import-mode || root.show-import-report || root.show-update-agree: Rectangle { width: 100%; height: 100%; z: 4; background: #00000088; LiveTouchArea { } }
+        if root.show-session && !root.modal-open: Rectangle {
+            x: parent.width - self.width - 8px; y: 70px; width: 440px; height: parent.height - 100px;
+            z: 3; background: Palette.bg1; border-width: 1px; border-color: Palette.bg3; border-radius: 6px;
+            LiveTouchArea { }
+            VerticalLayout { padding: 16px; spacing: 10px;
+                HorizontalLayout {
+                    Text { text: "Collaborate"; color: Palette.text-primary; font-size: 16px; font-weight: 600; horizontal-stretch: 1; vertical-alignment: center; }
+                    TextBtn { label: "Close"; clicked => { root.show-session = false; keys.focus(); } }
+                }
+                Flickable { vertical-stretch: 1; viewport-width: self.width; viewport-height: session-content.preferred-height;
+                    session-content := VerticalLayout { width: parent.width; spacing: 12px;
+                        Text { text: root.session-status == "" ? "Edit together. Start with your project, or open an invitation from someone else." : root.session-status; color: Palette.text-primary; font-size: 13px; wrap: word-wrap; }
+                        if !root.session-active: Field { value <=> root.session-name; placeholder: "Your name"; }
+                        if !root.session-active: PriBtn { label: "Start a session"; clicked => { root.command("session-host"); } }
+                        if !root.session-active: SecBtn { label: "Join from invitation…"; clicked => { root.command("session-open-invitation"); } }
+                        if root.session-active && root.session-host: Rectangle {
+                            min-height: invite-content.preferred-height + 20px; background: Palette.bg2; border-radius: 4px;
+                            invite-content := VerticalLayout { padding: 10px; spacing: 8px;
+                                Text { text: "Invite someone"; color: Palette.text-primary; font-size: 13px; font-weight: 600; }
+                                Field { value <=> root.session-invitee; placeholder: "Their name"; }
+                                HorizontalLayout { spacing: 8px;
+                                    SecBtn { label: root.session-editor-role ? "Can edit" : "Can view only"; clicked => { root.session-editor-role = !root.session-editor-role; } }
+                                    PriBtn { label: "Create invitation"; clicked => { root.command("session-invite"); } }
+                                }
+                            }
+                        }
+                        if root.session-code != "" && (root.session-host || !root.session-connected): Text { text: root.session-host ? "1. Save the invitation and send it privately.\n2. Open their reply to connect." : "Save your reply and send it back. The host opens it to finish connecting."; color: Palette.text-secondary; font-size: 13px; wrap: word-wrap; }
+                        if root.session-code != "" && (root.session-host || !root.session-connected): PriBtn { label: root.session-host ? "Save invitation…" : "Save reply…"; clicked => { root.command("session-save-code"); } }
+                        if root.session-host: SecBtn { label: "Open their reply…"; clicked => { root.command("session-open-reply"); } }
+                        if !root.session-active || root.session-host || !root.session-connected: TextBtn { label: root.session-show-codes ? "Hide connection codes" : "Use a code instead"; clicked => { root.session-show-codes = !root.session-show-codes; } }
+                        if root.session-show-codes: VerticalLayout { spacing: 8px;
+                            if !root.session-active || root.session-host: Text { text: root.session-host ? "Paste their reply" : "Paste an invitation"; color: Palette.text-secondary; font-size: 12px; }
+                            if !root.session-active || root.session-host: ConnectionText { value <=> root.session-input; }
+                            if !root.session-active: SecBtn { label: "Join with code"; enabled: root.session-input != ""; clicked => { root.command("session-join"); } }
+                            if root.session-host: SecBtn { label: "Connect with reply"; enabled: root.session-input != ""; clicked => { root.command("session-accept"); } }
+                            if root.session-code != "": Text { text: root.session-host ? "Your invitation code" : "Your reply code"; color: Palette.text-secondary; font-size: 12px; }
+                            if root.session-code != "": ConnectionText { value: root.session-code; read-only: true; }
+                        }
+                        for peer in root.session-peers: Rectangle {
+                            height: 54px; background: Palette.bg2; border-radius: 4px;
+                            HorizontalLayout { padding: 8px; spacing: 8px;
+                                VerticalLayout { spacing: 4px; horizontal-stretch: 1;
+                                    Text { text: peer.name; color: Palette.text-primary; font-size: 13px; overflow: elide; }
+                                    Text { text: peer.role + " · " + peer.state; color: Palette.text-secondary; font-size: 12px; }
+                                }
+                                if peer.revocable: TextBtn { label: "Remove"; clicked => { root.command("session-revoke:" + peer.id); } }
+                            }
+                        }
+                        Text { text: "Everyone needs their own copy of the footage. You can browse and play independently."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                        if root.session-readonly: Text { text: "Editing is paused while connecting or disconnected. Viewers cannot edit."; color: Palette.status-warning; font-size: 12px; wrap: word-wrap; }
+                        if root.session-issues != "": Text { text: "Edits that need attention"; color: Palette.text-primary; font-size: 13px; font-weight: 600; }
+                        if root.session-issues != "": Text { text: root.session-issues; color: Palette.status-warning; font-size: 12px; wrap: word-wrap; }
+                        if root.session-has-branch: SecBtn { label: "Save my edits as a project…"; clicked => { root.command("session-save-branch"); } }
+                        if !root.session-active: TextBtn { label: root.session-show-recovery ? "Hide recovery options" : "Recover a previous session"; clicked => { root.session-show-recovery = !root.session-show-recovery; } }
+                        if !root.session-active && root.session-show-recovery: VerticalLayout { spacing: 8px;
+                            SecBtn { label: "Recover a session I hosted…"; clicked => { root.command("session-recover-host"); } }
+                            SecBtn { label: "Recover my unsent edits…"; clicked => { root.command("session-recover-branch"); } }
+                        }
+                        if root.session-active: SecBtn { label: root.session-host ? "End session for everyone" : "Leave session"; clicked => { root.command("session-leave"); keys.focus(); } }
+                    }
+                }
+            }
+        }
+        if root.show-activity && !root.show-session && !root.modal-open: Rectangle {
+            x: parent.width - self.width - 8px; y: 70px; width: 380px; height: min(560px, parent.height - 100px);
+            z: 3; background: Palette.bg1; border-width: 1px; border-color: Palette.bg3; border-radius: 6px;
+            LiveTouchArea { }
+            VerticalLayout { padding: 16px; spacing: 12px;
+                HorizontalLayout {
+                    Text { text: "Background activity"; color: Palette.text-primary; font-size: 16px; font-weight: 600; horizontal-stretch: 1; vertical-alignment: center; }
+                    TextBtn { label: "Close"; clicked => { root.show-activity = false; keys.focus(); } }
+                }
+                Text { text: "Keep editing while these tasks run."; color: Palette.text-secondary; font-size: 13px; }
+                Rectangle { min-height: 84px; background: Palette.bg2; border-radius: 4px;
+                    VerticalLayout { padding: 12px; spacing: 6px;
+                        Text { text: root.import-busy ? "Import · Running" : "Import · Idle"; color: Palette.text-primary; font-size: 13px; font-weight: 600; }
+                        Text { text: root.import-busy ? root.import-status : "Imported media appears in the Project panel."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                        if root.import-busy: SecBtn { label: "Cancel import"; clicked => { root.command("import-cancel"); } }
+                    }
+                }
+                Rectangle { min-height: 84px; background: Palette.bg2; border-radius: 4px;
+                    VerticalLayout { padding: 12px; spacing: 6px;
+                        Text { text: root.export-busy ? "Export · Running" : "Export · Idle"; color: Palette.text-primary; font-size: 13px; font-weight: 600; }
+                        Text { text: root.export-busy ? root.export-preparing ? root.export-preparation-label : root.export-percent + "%" + (root.export-eta == "" ? "" : " · " + root.export-eta) : "Open Export to manage queued jobs and completed files."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                        SecBtn { label: root.export-busy ? "View export progress" : "Open export queue"; clicked => { root.command("export-view"); } }
+                    }
+                }
+                Rectangle { min-height: 84px; background: Palette.bg2; border-radius: 4px;
+                    VerticalLayout { padding: 12px; spacing: 6px;
+                        Text { text: root.preview-cache-paused ? "Preview cache · Paused" : "Preview cache"; color: Palette.text-primary; font-size: 13px; font-weight: 600; }
+                        Text { text: root.preview-cache-status == "" ? root.preview-cache-label : root.preview-cache-status; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                        if root.preview-cache-auto: SecBtn { label: root.preview-cache-paused ? "Resume preparation" : "Pause preparation"; clicked => { root.preview-cache-paused = !root.preview-cache-paused; root.preview-cache-settings(); } }
+                    }
+                }
+                Rectangle { min-height: 84px; background: Palette.bg2; border-radius: 4px;
+                    VerticalLayout { padding: 12px; spacing: 6px;
+                        Text { text: root.engine-busy ? "Media engine · Working" : root.engine-ready ? "Media engine · Ready" : "Media engine · Setup needed"; color: Palette.text-primary; font-size: 13px; font-weight: 600; }
+                        Text { text: root.engine-status; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                        SecBtn { label: "Manage media engine"; clicked => { root.command("engine-setup"); } }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+        if root.show-review && !root.show-session && !root.modal-open: Rectangle {
+            x: parent.width - self.width - 8px; y: 70px; width: 380px; height: parent.height - 100px;
+            z: 3; background: Palette.bg1; border-width: 1px; border-color: Palette.bg3; border-radius: 6px;
+            LiveTouchArea { }
+            VerticalLayout { padding: 16px; spacing: 10px;
+                HorizontalLayout {
+                    Text { text: "Review notes"; color: Palette.text-primary; font-size: 16px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                    TextBtn { label: "Close"; clicked => { root.show-review = false; keys.focus(); } }
+                }
+                Text { text: root.review-summary; color: Palette.text-secondary; font-size: 12px; }
+                HorizontalLayout { spacing: 8px;
+                    SecBtn { label: "Import notes"; clicked => { root.command("review-import"); } }
+                    SecBtn { label: "Export notes"; clicked => { root.command("review-export"); } }
+                }
+                Field { value <=> root.review-author; placeholder: "Reviewer name"; }
+                Rectangle { height: 84px; background: Palette.bg0; border-width: 1px; border-color: draft.has-focus ? Palette.accent : Palette.bg3; border-radius: 3px; clip: true;
+                    Text { x: 8px; y: 8px; text: root.review-draft == "" ? "Add a note at the playhead…" : ""; color: Palette.text-secondary; font-size: 13px; }
+                    draft := TextInput { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px;
+                        text <=> root.review-draft; color: Palette.text-primary; font-size: 13px; wrap: word-wrap; single-line: false;
+                        changed has-focus => { if (self.has-focus) { LiveFocus.input-gained(); } else { LiveFocus.input-lost(); } }
+                        Timer { interval: 150ms; running: draft.has-focus; triggered => { LiveFocus.heartbeat(); } }
+                    }
+                }
+                if root.review-error != "": Text { text: root.review-error; color: Palette.status-warning; wrap: word-wrap; font-size: 12px; }
+                HorizontalLayout { spacing: 8px;
+                    SecBtn { label: root.review-show-resolved ? "Hide resolved" : "Show resolved"; clicked => { root.command("review-filter"); } }
+                    PriBtn { label: "Add note"; enabled: root.review-draft != ""; clicked => { root.command("review-add"); } }
+                }
+                Field { value <=> root.review-query; placeholder: "Search notes or reviewers"; edited => { root.command("review-search"); } }
+                HorizontalLayout {
+                    TextBtn { label: "Previous"; enabled: root.review-page > 0; clicked => { root.command("review-prev"); } }
+                    Text { text: (root.review-page + 1) + " / " + root.review-pages; color: Palette.text-secondary; font-size: 12px; horizontal-stretch: 1; horizontal-alignment: center; vertical-alignment: center; }
+                    TextBtn { label: "Next"; enabled: root.review-page + 1 < root.review-pages; clicked => { root.command("review-next"); } }
+                }
+                Flickable { vertical-stretch: 1; viewport-width: self.width; viewport-height: note-list.preferred-height;
+                    note-list := VerticalLayout { width: parent.width; spacing: 8px;
+                        for item in root.review-notes: Rectangle {
+                            min-height: note-content.preferred-height + 20px; background: Palette.bg2; border-radius: 4px;
+                            note-content := VerticalLayout { padding: 10px; spacing: 6px;
+                                HorizontalLayout { spacing: 8px;
+                                    TextBtn { label: item.timecode; tooltip: "Go to note"; clicked => { root.command("review-jump:" + item.id); } }
+                                    Text { text: item.author; color: Palette.text-secondary; font-size: 12px; overflow: elide; min-width: 0px; horizontal-stretch: 1; vertical-alignment: center; }
+                                }
+                                Text { text: item.text; color: Palette.text-primary; font-size: 13px; wrap: word-wrap; }
+                                TextBtn { label: item.resolved ? "Reopen" : "Resolve"; clicked => { root.command("review-resolve:" + item.id); } }
+                            }
+                        }
+                        if root.review-notes.length == 0: Text { text: "No notes here yet. Add one while reviewing your timeline."; color: Palette.text-secondary; font-size: 13px; wrap: word-wrap; }
+                    }
+                }
+            }
+        }
+        if root.show-engine-setup: Rectangle { width: 100%; height: 100%; z: 10; background: #00000088; LiveTouchArea { } }
+        if root.show-engine-setup: Rectangle {
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            width: min(640px, parent.width - 48px); height: 410px; z: 11;
+            background: Palette.bg1; border-width: 1px; border-color: Palette.bg3; border-radius: 4px;
+            VerticalLayout { padding: 20px; spacing: 12px;
+                Text { text: "Media engine"; color: Palette.text-primary; font-size: 18px; font-weight: 600; }
+                Text { text: "Set up once. Edit offline. Your media tools are reused across app updates."; color: Palette.text-secondary; font-size: 13px; wrap: word-wrap; }
+                Rectangle {
+                    background: Palette.bg0; border-radius: 4px; vertical-stretch: 1;
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        Text { text: root.engine-status; color: Palette.text-primary; font-size: 13px; wrap: word-wrap; }
+                        Text { text: root.engine-details; color: Palette.text-secondary; font-size: 12px; wrap: char-wrap; }
+                    }
+                }
+                SecBtn { label: root.preview-hardware ? "Preview decode: automatic GPU / CPU fallback" : "Preview decode: CPU"; clicked => { root.command("preview-hardware-toggle"); } }
+                Text { text: "Automatic decoding supports AMD, Intel and NVIDIA through FFmpeg. Frames return to the CPU compositor; hardware use depends on codec and driver support."; color: Palette.text-secondary; font-size: 13px; wrap: word-wrap; }
+                HorizontalLayout { spacing: 8px;
+                    SecBtn { label: "Choose installed tools"; enabled: !root.engine-busy; clicked => { root.command("engine-select"); } }
+                    SecBtn { label: "Offline archives"; enabled: !root.engine-busy; clicked => { root.command("engine-offline"); } }
+                    SecBtn { label: "Check again"; enabled: !root.engine-busy; clicked => { root.command("engine-check"); } }
+                }
+                HorizontalLayout { alignment: end; spacing: 8px;
+                    SecBtn { label: "Close"; clicked => { root.command("engine-close"); keys.focus(); } }
+                    if root.engine-busy: SecBtn { label: "Cancel setup"; clicked => { root.command("engine-cancel"); } }
+                    if !root.engine-ready: PriBtn { label: "Download and set up"; enabled: !root.engine-busy; clicked => { root.command("engine-install"); } }
+                }
+            }
+        }
         if root.show-update-agree: Rectangle {
             x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; z: 9; width: min(560px, parent.width - 48px); height: 260px;
             background: Palette.bg1; border-width: 1px; border-color: Palette.bg3; border-radius: 4px;
@@ -2948,6 +3224,7 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                                 Text { text: "Versions"; x: 10px; y: 0px; height: 100%; color: root.preferences-tab == 3 ? Palette.accent : Palette.text-secondary; font-size: 12px; font-weight: 500; vertical-alignment: center; }
                                 pref-versions := LiveTouchArea { mouse-cursor: pointer; clicked => { root.preferences-tab = 3; root.command("versions-refresh"); } }
                             }
+                            SecBtn { label: "Media engine"; clicked => { root.command("engine-setup"); } }
                             Rectangle { vertical-stretch: 1; }
                         }
                     }

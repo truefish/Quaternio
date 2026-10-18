@@ -16,3 +16,4 @@ packaging/stage/
 # OS
 .DS_Store
 Thumbs.db
+release.sh

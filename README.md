@@ -28,9 +28,34 @@ App version (the release you download, e.g. `0.1.0-beta.1`) is independent of th
 
 In Preferences → **Versions**, you can browse published GitHub releases and install or switch builds. When a newer release exists, a quiet toolbar badge appears — no modal on launch.
 
+## Review and background activity
+
+Open **Review** in the toolbar to add timecoded notes at the playhead, jump between notes, search reviewers, and resolve or reopen feedback. Notes save with the project and support undo. Save the project before exporting a `.qreview` file; reviewers should start from that same saved project. Import adds new notes without replacing local resolution of existing notes. Review files contain notes and project identity, not footage or local media paths. Older projects receive an identity on load, so save once before distributing review copies.
+
+Choose **Track height** beside the timeline zoom controls, or search the command palette for Compact, Medium or Large tracks. This preference stays local and does not change the project.
+
+Open **Activity** to see imports, export progress, preview preparation and media-engine setup while editing.
+
+## Live peer editing
+
+Open **Collaborate** in the toolbar. A participant hosts the project; no account or hosted signaling service is required.
+
+1. Choose **Start a session**, enter the other person’s name, select **Can edit** or **Can view only**, then choose **Create invitation**.
+2. Choose **Save invitation…** and send the `.qpeer` file privately. Each person needs a separate invitation.
+3. The other person chooses **Join from invitation…**, opens the file, then uses **Save reply…** to send a reply back.
+4. Choose **Open their reply…** to finish connecting. Edits then synchronize over an encrypted WebRTC connection. **Use a code instead** provides the same flow by pasting codes.
+
+Moves, trims, splits, inserts, deletes, ripple edits, track changes, transitions, review notes and clip properties synchronize through the host's ordered log. Independent properties merge. Ambiguous structural edits are rejected atomically and retained for review; use **Save retained local branch** to preserve the local version. Undo/redo compensate the author's changes and refuse to overwrite later conflicting work.
+
+Playhead, selection, workspace, source marks and media paths remain local. Footage is not transferred: use local relinking on each machine. Exports wait for acknowledged edits and use an immutable local project snapshot. The host can revoke invitations; the server enforces Viewer permissions.
+
+Direct LAN connections work without public services. Internet connections across NAT may require your own STUN/TURN configuration on both endpoints. Set `QUATERNIO_ICE_SERVERS` before launching to a JSON array, for example `[{"urls":["stun:stun.example.net:3478"],"username":"","credential":""}]`. TURN entries also require their username and credential. No public STUN/TURN service is enabled by default. Cross-network relay operation still needs deployment validation.
+
+If a connection is lost, the current local document remains available. Use a fresh invitation to reconnect; automatic reconnect and host handoff are pending. Host logs (`.qsession`) and client outboxes (`.qoutbox`) are stored under Quaternio's app-data `sessions` directory. The collaboration panel can recover acknowledged host history or a retained client branch as a local project. Save that recovered copy before starting another session.
+
 ## Quickstart
 
-Download a build from [Releases](../../releases). Each archive already includes `ffmpeg` and `ffprobe` next to the Quaternio binary.
+Download a build from [Releases](../../releases). Application archives do not bundle FFmpeg. Quaternio detects a compatible existing `ffmpeg`/`ffprobe` pair. If none is found, import/export offers one-time setup or selection of installed tools. The managed engine is stored in user app-data and reused across releases; editing works offline after setup.
 
 ### Windows (x64)
 
@@ -48,7 +73,7 @@ Quaternio installs under `%LOCALAPPDATA%\Quaternio` (no admin required). Windows
 2. Extract the zip to a folder.
 3. Open that folder and double-click `quaternio.exe`.
 
-Keep `quaternio.exe`, `ffmpeg.exe`, and `ffprobe.exe` in the same folder.
+Keep `quaternio.exe` in your application folder. Open **Media engine** in Preferences or the command palette to install or select media tools. Legacy tools beside the app remain discoverable.
 
 ### Linux (x86_64)
 
@@ -127,7 +152,7 @@ If macOS still blocks it: System Settings → Privacy & Security → allow Quate
 
 - In **Export**, use **Auto** for hardware encoding with a CPU fallback. **Hardware** requires a working GPU encoder and reports a failure if none is available. macOS uses VideoToolbox; Linux can use VAAPI or NVIDIA; Windows can use NVIDIA, Intel, or AMD.
 
-GPU export needs a compatible driver and FFmpeg encoder. Linux VAAPI also needs the host's `libva` libraries, a GPU driver, and access to `/dev/dri/renderD*`. Picture effects may still run on the CPU. Click an export status message to view or copy the full details.
+GPU export needs a compatible driver and FFmpeg encoder. AMD can be selected explicitly; Windows also offers an optional D3D11 adapter index. Linux Radeon uses VAAPI and can select a render node through `QUATERNIO_VAAPI_DEVICE`. The chosen encoder and picture-processing route are reported separately. Linux VAAPI also needs the host's `libva` libraries, a GPU driver, and access to `/dev/dri/renderD*`. Picture effects may still run on the CPU. Click an export status message to view or copy the full details.
 
 ## Build from source
 
@@ -136,9 +161,9 @@ Use this to compile Quaternio yourself.
 You need:
 
 - [Rust](https://rustup.rs/) (stable)
-- **FFmpeg** and **ffprobe** on your `PATH`, or copied next to the built binary before you run it
+- A compatible **FFmpeg** and **ffprobe** pair, detected from existing tools or installed once through Media engine setup when needed
 
-For `cargo run` or debug builds, copy both FFmpeg tools into `target/debug/` if they are not on `PATH`. Cargo does not install them. Repeat this after `cargo clean`.
+Debug and release builds share the managed media engine. You can also set `QUATERNIO_FFMPEG_DIR` to a folder containing a matching pair, select a tools folder in Media engine setup, or use `PATH`. Setup validates versions and required capabilities. Offline installation accepts the pinned archives listed in `packaging/ffmpeg-lock.json`, using their `file` names in one folder; alternatively select an already extracted pair.
 
 ### Windows (x64)
 

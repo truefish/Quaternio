@@ -16,7 +16,7 @@ use crate::export::diagnostics::ExportDiagnostics;
 
 const HELP: &str = "Quaternio headless render\n\
 Usage: quaternio --render PROJECT --output OUTPUT.mp4 [options]\n\
-  --encoder auto|hardware|cpu  Auto fallback, require GPU encoder, or CPU (default auto)\n\
+  --encoder auto|hardware|amd|cpu  Auto fallback, require GPU encoder, or CPU (default auto)\n\
   --route auto|composite   Allow eligible direct export, or require compositor\n\
   --speed balanced|fast|compact  Encoding speed/compression choice (default balanced)\n\
   --report REPORT.json    Save timing, planned frame count, and progress metadata\n\
@@ -92,6 +92,7 @@ pub fn run_if_requested() -> Result<bool, String> {
     let requested_encoder = match request.encoder {
         EncoderPreference::Cpu => "cpu",
         EncoderPreference::Hardware => "hardware",
+        EncoderPreference::Amd(_) => "amd",
         EncoderPreference::Auto => "auto" };
     let mut report = RenderReport {
         schema_version: 2,
@@ -222,6 +223,7 @@ fn parse(arguments: Vec<OsString>) -> Result<Request, String> {
     let mut output = None;
     let mut report = None;
     let mut encoder = EncoderPreference::Auto;
+    let mut amd_adapter = None;
     let mut force_composite = false;
     let mut width = None;
     let mut height = None;
@@ -251,7 +253,8 @@ fn parse(arguments: Vec<OsString>) -> Result<Request, String> {
                     Some("auto") => EncoderPreference::Auto,
                     Some("cpu") => EncoderPreference::Cpu,
                     Some("hardware") => EncoderPreference::Hardware,
-                    _ => return Err("--encoder must be auto, hardware, or cpu".into()) }
+                    Some("amd") => EncoderPreference::Amd(None),
+                    _ => return Err("--encoder must be auto, hardware, amd, or cpu".into()) }
             }
             "--route" => {
                 force_composite = match value.to_str() {
@@ -275,6 +278,9 @@ fn parse(arguments: Vec<OsString>) -> Result<Request, String> {
                     .filter(|value| (1..=40).contains(value))
                     .ok_or("--crf must be 1..40")?
             }
+            "--amd-adapter" => {
+                amd_adapter = Some(value.to_str().and_then(|v| v.parse::<u32>().ok()).filter(|v| *v < 32).ok_or("--amd-adapter must be 0..31")?);
+            },
             "--fps" => frame_rate = Some(parse_rate(&value)?),
             "--cancel-after-ms" => {
                 cancel_after_ms = Some(
@@ -286,6 +292,10 @@ fn parse(arguments: Vec<OsString>) -> Result<Request, String> {
                 )
             }
             _ => return Err(format!("Unknown render option: {option}\n{HELP}")) }
+    }
+    if let Some(adapter) = amd_adapter {
+        if !cfg!(windows) || !matches!(encoder, EncoderPreference::Amd(_)) { return Err("--amd-adapter requires --encoder amd on Windows".into()); }
+        encoder = EncoderPreference::Amd(Some(adapter));
     }
     let project = project.ok_or("--render requires a project path")?;
     let output = output.ok_or("--render requires --output OUTPUT.mp4")?;

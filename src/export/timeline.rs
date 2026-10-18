@@ -53,7 +53,7 @@ pub(super) fn plan(project: &Project, settings: &ExportSettings) -> Option<Timel
         let b = clip_end.min(end);
         if a < cursor || clip.source_in < 0 || clip.source_time_offset != 0.0
             || clip.scale != 1.0 || clip.pos_x != 0.0 || clip.pos_y != 0.0
-            || clip.opacity != 1.0 || !clip.grade.is_identity() { return None; }
+            || clip.opacity != 1.0 || !clip.grade.is_identity() || !clip.transform.is_identity() { return None; }
         let media = project.media(clip.media_id)?;
         if media.kind != MediaKind::Video || !media.has_video || media.width < 2
             || media.height < 2 || !media.source_fps.is_finite()
@@ -304,7 +304,7 @@ pub(super) fn render(
         .args(["-map", "[v]", "-map", "[a]", "-enc_time_base:v"])
         .arg(format!("{}/{}", plan.rate.den, plan.rate.num))
         // Passthrough prevents an early source EOF being hidden by duplicated frames.
-        .args(["-fps_mode", "passthrough", "-frames:v"]).arg(plan.frame_count.to_string());
+        .args(["-vsync", "0", "-frames:v"]).arg(plan.frame_count.to_string());
     encoder.configure(&mut command, settings);
     encoder.configure_pixel_format(&mut command);
     command.args(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t"])

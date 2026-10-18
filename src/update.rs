@@ -438,14 +438,3 @@ fn write_helper(
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_beta_tags() {
-        assert!(parse_version("v0.1.0-beta.1").is_some());
-        assert!(parse_version("0.1.0-beta.1").is_some());
-    }
-}

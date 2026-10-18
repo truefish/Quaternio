@@ -1,6 +1,7 @@
 //! One-way import of foreign NLE timelines into a Quaternio [`Project`].
 
 mod fcpxml;
+mod fcp7;
 
 use std::path::{Path, PathBuf};
 
@@ -68,7 +69,17 @@ pub fn import_timeline(path: &Path) -> Result<(Project, ImportReport), String> {
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
-        "fcpxml" | "xml" => import_fcpxml(path),
+        "fcpxml" | "xml" => {
+            let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+            if metadata.len() > 32 * 1024 * 1024 { return Err("Timeline XML exceeds the 32 MiB import limit".into()); }
+            let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let doc = roxmltree::Document::parse_with_options(&text, roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() }).map_err(|e| format!("Invalid timeline XML: {e}"))?;
+            match doc.root_element().tag_name().name() {
+                "xmeml" => fcp7::parse(&text, path.parent().unwrap_or_else(|| Path::new("."))),
+                "fcpxml" => import_fcpxml(path),
+                name => Err(format!("Unsupported timeline XML root <{name}>; expected <fcpxml> or <xmeml>")),
+            }
+        },
         "prproj" => Err(
             "Premiere .prproj is not imported directly yet. In Premiere: File → Export → Final Cut Pro XML, then import that .fcpxml / .xml here."
                 .into(),

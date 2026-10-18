@@ -184,6 +184,7 @@ fn target_track(
 
 fn make_clip(project: &mut Project, item: &Placement, at: i64) -> Clip {
     Clip {
+        transform: Default::default(),
         id: project.alloc(),
         media_id: item.media_id,
         name: item.name.clone(),

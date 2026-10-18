@@ -44,6 +44,14 @@ pub fn layout_tracks(sequence: &Sequence) -> Vec<TrackRow> {
     layout_rows(sequence, 0.0)
 }
 
+/// Explicit lane sizes are local view preferences, never document edits.
+pub fn layout_rows_with_density(sequence: &Sequence, body: f32, density: i32) -> Vec<TrackRow> {
+    let height = match density { 1 => 28.0, 2 => 48.0, 3 => 76.0, _ => return layout_rows(sequence, body) };
+    visual_order(sequence).into_iter().enumerate().map(|(index, track_index)| TrackRow {
+        track_index, y: index as f32 * height, h: height,
+    }).collect()
+}
+
 /// Fit compact rows to the available body without stretching a short timeline
 /// into oversized lanes. Many tracks retain their minimum height and scroll.
 pub fn layout_rows(sequence: &Sequence, body: f32) -> Vec<TrackRow> {
@@ -85,9 +93,12 @@ pub fn hit_test(sequence: &Sequence, x: f32, y: f32, px: f32, scroll: f32) -> Hi
 }
 
 pub fn hit_rows(sequence: &Sequence, x: f32, y: f32, px: f32, scroll: f32, body: f32) -> Hit {
+    hit_layout(sequence, x, y, px, scroll, &layout_rows(sequence, body))
+}
+
+pub fn hit_layout(sequence: &Sequence, x: f32, y: f32, px: f32, scroll: f32, rows: &[TrackRow]) -> Hit {
     let px = px.max(0.05);
     let frame = frame_at(x, scroll, px);
-    let rows = layout_rows(sequence, body);
     let Some(row) = rows.iter().find(|row| y >= row.y && y < row.y + row.h) else {
         return Hit::Empty { frame };
     };
@@ -147,6 +158,8 @@ pub fn snap_delta(edges: &[i64], targets: &[i64], threshold: i64) -> i64 {
     best.unwrap_or(0)
 }
 
+
+
 pub fn snap_targets(sequence: &Sequence, ignore: &[u64]) -> Vec<i64> {
     let mut targets = vec![0, sequence.playhead];
     if let Some(frame) = sequence.in_point {
@@ -168,4 +181,3 @@ pub fn snap_targets(sequence: &Sequence, ignore: &[u64]) -> Vec<i64> {
     targets.dedup();
     targets
 }
-

@@ -1,12 +1,13 @@
-Quaternio bundles FFmpeg and ffprobe as separate executable programs.
+Quaternio can install FFmpeg and ffprobe as separate executable programs.
 FFmpeg project and source: https://ffmpeg.org/ and https://git.ffmpeg.org/ffmpeg.git
 
-See provenance.json for the exact download URLs, archive SHA256 digests,
-upstream version/source information, and hashes of the packaged binaries.
-The *-version.txt, *-configuration.txt and *-license.txt files are captured
-from BOTH packaged programs on the native release runner. They describe
+See engine-lock.json and binary-sha256.json (runtime setup), or provenance.json
+(development preparation), for download URLs, archive SHA256 digests,
+upstream version/source information, and hashes of the installed binaries.
+The *-version.txt, *-buildconf.txt (or *-configuration.txt) and *-license.txt
+files are captured from BOTH programs on the native host. They describe
 the actual build, including enabled external libraries and license version.
-Full GPL v2/v3 texts are included in licenses/ (from official FFmpeg n7.1.1
+Full GPL v2/v3 texts are included alongside this notice or in licenses/ (from official FFmpeg n7.1.1
 COPYING.GPLv2 and COPYING.GPLv3). The applicable version is reported by -L.
 The BtbN archive's LICENSE.txt is also preserved when supplied.
 Quaternio's own LICENSE does not replace third-party licenses.

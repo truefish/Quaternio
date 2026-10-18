@@ -26,6 +26,8 @@ fn checksum(key: &str, clock: VideoOrigin) -> String {
     hash.update(key.as_bytes());
     hash.update(clock.seconds.to_bits().to_le_bytes());
     hash.update(clock.stream.to_le_bytes());
+    hash.update(clock.frame_count.unwrap_or(0).to_le_bytes());
+    hash.update(clock.nominal_fps.to_bits().to_le_bytes());
     format!("{:x}", hash.finalize())
 }
 
@@ -107,7 +109,7 @@ fn read(root: &Path, key: &str) -> Option<VideoOrigin> {
         return None;
     }
     let proof: Proof = serde_json::from_slice(&bytes).ok()?;
-    (proof.version == 1
+    (proof.version == 2
         && proof.key == key
         && proof.checksum == checksum(key, proof.clock)
         && proof.clock.seconds.is_finite()
@@ -154,7 +156,7 @@ fn save_at(root: &Path, path: &Path, stamp: OriginStamp, clock: VideoOrigin) {
         return;
     }
     let proof = Proof {
-        version: 1,
+        version: 2,
         key: key.clone(),
         clock,
         checksum: checksum(&key, clock) };

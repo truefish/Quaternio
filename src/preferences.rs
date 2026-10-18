@@ -36,6 +36,9 @@ pub struct Preferences {
     pub saved_layout: Option<Layout>,
     pub current_layout: Option<Layout>,
     pub vim_navigation: bool,
+    pub preview_hardware: bool,
+    pub reviewer_name: String,
+    pub track_density: i32,
     pub preview_cache: crate::playback::optimized::PreviewCacheSettings }
 
 impl Default for Preferences {
@@ -47,6 +50,9 @@ impl Default for Preferences {
             saved_layout: None,
             current_layout: None,
             vim_navigation: false,
+            preview_hardware: true,
+            reviewer_name: "Editor".into(),
+            track_density: 0,
             preview_cache: Default::default() }
     }
 }
@@ -59,7 +65,9 @@ pub struct ExportFormat {
     pub frame_rate: crate::project::FrameRate,
     pub crf: f32,
     pub speed: i32,
-    pub encoder: i32 }
+    pub encoder: i32,
+    #[serde(default)]
+    pub amd_adapter: Option<u32> }
 
 impl Preferences {
     pub fn load() -> Self {

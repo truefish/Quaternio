@@ -152,7 +152,9 @@ pub enum EncoderPreference {
     Auto,
     Cpu,
     /// Require hardware encoding; picture composition may still use the CPU.
-    Hardware }
+    Hardware,
+    /// Require AMD hardware encoding (AMF on Windows, VAAPI on Linux).
+    Amd(Option<u32>) }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RenderSpeed {
@@ -193,7 +195,7 @@ enum VideoEncoder {
     Cpu,
     Nvenc,
     Qsv,
-    Amf,
+    Amf(Option<u32>),
     VideoToolbox,
     Vaapi(PathBuf) }
 
@@ -203,7 +205,7 @@ impl VideoEncoder {
             Self::Cpu => "CPU H.264",
             Self::Nvenc => "NVIDIA H.264",
             Self::Qsv => "Intel H.264",
-            Self::Amf => "AMD H.264",
+            Self::Amf(_) => "AMD H.264",
             Self::VideoToolbox => "Apple VideoToolbox H.264",
             Self::Vaapi(_) => "VAAPI H.264" }
     }
@@ -217,6 +219,10 @@ impl VideoEncoder {
 
     // Device initialization is global and must precede inputs and filter graphs.
     fn configure_device(&self, command: &mut Command) {
+        if let Self::Amf(Some(index)) = self {
+            command.args(["-init_hw_device", &format!("d3d11va=quaternio_dx:{index}"),
+                "-init_hw_device", "amf=quaternio_amf@quaternio_dx", "-filter_hw_device", "quaternio_amf"]);
+        }
         if let Self::Vaapi(device) = self {
             command.arg("-vaapi_device").arg(device);
         }
@@ -251,9 +257,9 @@ impl VideoEncoder {
             (Self::Qsv, RenderSpeed::Balanced) => "medium",
             (Self::Qsv, RenderSpeed::Fast) => "veryfast",
             (Self::Qsv, RenderSpeed::Compact) => "slow",
-            (Self::Amf, RenderSpeed::Balanced) => "balanced",
-            (Self::Amf, RenderSpeed::Fast) => "speed",
-            (Self::Amf, RenderSpeed::Compact) => "quality",
+            (Self::Amf(_), RenderSpeed::Balanced) => "balanced",
+            (Self::Amf(_), RenderSpeed::Fast) => "speed",
+            (Self::Amf(_), RenderSpeed::Compact) => "quality",
             // These APIs have no portable equivalent of the above presets.
             (Self::VideoToolbox | Self::Vaapi(_), _) => "" };
         match self {
@@ -287,7 +293,7 @@ impl VideoEncoder {
                     &quality,
                 ]);
             }
-            Self::Amf => {
+            Self::Amf(_) => {
                 command.args([
                     "-c:v", "h264_amf", "-quality", preset, "-rc", "cqp", "-qp_i", &quality,
                     "-qp_p", &quality, "-qp_b", &quality,
@@ -590,6 +596,7 @@ fn direct_export_plan(project: &Project, settings: &ExportSettings) -> Option<Di
         || video.pos_y != 0.0
         || video.opacity != 1.0
         || !video.grade.is_identity()
+        || !video.transform.is_identity()
     {
         return None;
     }
@@ -797,7 +804,7 @@ fn source_matches_rate_uncached(
             "-select_streams",
             "V:0",
             "-show_entries",
-            "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration,codec_name,pix_fmt,color_range,color_space,color_transfer,color_primaries,sample_aspect_ratio:stream_side_data=rotation:stream_tags=rotate",
+            "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration,codec_name,pix_fmt,color_range,color_space,color_transfer,color_primaries,sample_aspect_ratio:stream_side_data_list:stream_tags=rotate",
             "-of",
             "json",
         ])
@@ -974,7 +981,7 @@ fn export_direct(
         .args(["-filter_complex_threads", "2", "-filter_complex"])
         .arg(format!("{video_filter};{audio_filter}"))
         .args(["-map", "[v]", "-map", "[a]", "-enc_time_base:v", &time_base,
-            "-fps_mode", "passthrough", "-frames:v"])
+            "-vsync", "0", "-frames:v"])
         .arg(plan.frame_count.to_string());
     encoder.configure(&mut command, settings);
     if !gpu_resident {
@@ -1157,12 +1164,13 @@ fn record_encoder(encoder: &VideoEncoder) {
             VideoEncoder::Cpu => "libx264",
             VideoEncoder::Nvenc => "h264_nvenc",
             VideoEncoder::Qsv => "h264_qsv",
-            VideoEncoder::Amf => "h264_amf",
+            VideoEncoder::Amf(_) => "h264_amf",
             VideoEncoder::VideoToolbox => "h264_videotoolbox",
             VideoEncoder::Vaapi(_) => "h264_vaapi",
         }.into());
         d.device = match encoder {
             VideoEncoder::Vaapi(path) => Some(path.to_string_lossy().into_owned()),
+            VideoEncoder::Amf(Some(index)) => Some(format!("D3D11 adapter {index}")),
             _ => None,
         };
         d.frames_encoded = None;
@@ -1258,6 +1266,7 @@ fn export_mp4_inner(
         Some(prepare_mixed_audio(project, start, end, cancel, &progress)?)
     }) })?;
     let timeline_failed = std::cell::Cell::new(false);
+    let source_failed = std::cell::Cell::new(false);
     let render = |encoder: &VideoEncoder| {
         record_encoder(encoder);
         if let Some(plan) = &direct {
@@ -1322,7 +1331,7 @@ fn export_mp4_inner(
                     }
                 }
             }
-            export_composited(project, &working_settings, encoder, audio, cancel, progress.clone())
+            export_composited(project, &working_settings, encoder, audio, cancel, progress.clone(), &source_failed)
         } else {
             send_progress(&progress, 0.0, format!("Compositor · {}", encoder.label()));
             export_composited(
@@ -1334,6 +1343,7 @@ fn export_mp4_inner(
                     .ok_or("The mixed audio stream was not prepared")?,
                 cancel,
                 progress.clone(),
+                &source_failed,
             )
         }
     };
@@ -1343,11 +1353,11 @@ fn export_mp4_inner(
         if cancel.load(Ordering::Acquire) {
             return Err("Export cancelled".into());
         }
-        if encoder == VideoEncoder::Cpu {
+        if encoder == VideoEncoder::Cpu || source_failed.get() {
             return Err(error);
         }
-        gpu::encoder_failed(&ffmpeg, settings, &error);
-        if matches!(settings.encoder, EncoderPreference::Hardware) {
+        gpu::encoder_failed(&ffmpeg, settings);
+        if matches!(settings.encoder, EncoderPreference::Hardware | EncoderPreference::Amd(_)) {
             return Err(format!(
                 "Required hardware encoding failed ({}); output was not replaced. {error}",
                 encoder.description()
@@ -1386,6 +1396,7 @@ fn export_composited(
     audio_temp: &TemporaryAudioFile,
     cancel: &AtomicBool,
     progress: Sender<ExportProgress>,
+    source_failed: &std::cell::Cell<bool>,
 ) -> Result<(), String> {
     diagnostics::record(|d| {
         d.route = Some(ExportRoute::Composite);
@@ -1559,6 +1570,7 @@ fn export_composited(
                 let image = last_composite.get_or_render(frame, || {
                     let image = diagnostics::measure(ExportStage::Composition, || composite(project, frame, width, height, &mut source));
                     if let Some(error) = source.take_decode_error() {
+                        source_failed.set(true);
                         return Err(format!("Could not render frame {frame}: {error}"));
                     }
                     Ok(image)

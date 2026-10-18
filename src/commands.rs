@@ -23,6 +23,15 @@ macro_rules! actions {
 }
 
 actions![
+    ("session", "Collaboration: Live peer session", "", "", Always),
+    ("track-density:0", "Timeline: Automatic track height", "", "", Always),
+    ("track-density:1", "Timeline: Compact tracks", "", "", Always),
+    ("track-density:2", "Timeline: Medium tracks", "", "", Always),
+    ("track-density:3", "Timeline: Large tracks", "", "", Always),
+    ("activity", "Window: Background activity", "", "", Always),
+    ("review", "Review: Show timecoded notes", "", "", Always),
+    ("relink-missing", "Project: Batch relink missing media", "", "", Always),
+    ("engine-setup", "Settings: Media engine setup", "", "", Always),
     (
         "relink-media",
         "Project: Relink selected media",

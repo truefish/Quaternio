@@ -170,6 +170,7 @@ fn parse_fcpxml(text: &str, xml_dir: &Path, source_path: &Path) -> Result<(Proje
             if let Some(&track_index) = video_track_for_lane.get(&item.lane) {
                 let id = project.alloc();
                 project.sequence.tracks[track_index].clips.push(Clip {
+                    transform: Default::default(),
                     id,
                     media_id,
                     name: item.name.clone(),
@@ -195,6 +196,7 @@ fn parse_fcpxml(text: &str, xml_dir: &Path, source_path: &Path) -> Result<(Proje
                 if audio_start_used.insert(key, ()).is_none() {
                     let id = project.alloc();
                     project.sequence.tracks[track_index].clips.push(Clip {
+                        transform: Default::default(),
                         id,
                         media_id,
                         name: item.name.clone(),
