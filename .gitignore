@@ -17,3 +17,6 @@ packaging/stage/
 .DS_Store
 Thumbs.db
 release.sh
+
+# Python build caches
+__pycache__/

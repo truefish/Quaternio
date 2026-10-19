@@ -1432,9 +1432,7 @@ impl SeqDec {
             .arg("-dn")
             .arg("-vf")
             .arg(format!("{},scale={w}:{h}:flags=bilinear", start.select))
-            // -vsync 0 also works with distribution FFmpeg 4.4; -fps_mode needs 5.1+.
-            .arg("-vsync")
-            .arg("0")
+            .args(crate::media_engine::passthrough_args(&ffmpeg).ok()?)
             .arg("-f")
             .arg("rawvideo")
             .arg("-pix_fmt")
@@ -1505,6 +1503,7 @@ fn decode_frame_with_request(
     request: Option<&AtomicBool>,
 ) -> Result<Vec<u8>, String> {
     let ffmpeg = find_ffmpeg()?;
+    let timing = crate::media_engine::passthrough_args(&ffmpeg)?;
     let start = cli_frame_start(path, index, fps, cancel, request)?;
     let mut args = vec![
         "-nostdin".into(),
@@ -1538,8 +1537,8 @@ fn decode_frame_with_request(
         "1".into(),
         "-vf".into(),
         format!("{},scale={w}:{h}:flags=bilinear", start.select),
-        "-vsync".into(),
-        "0".into(),
+        timing[0].into(),
+        timing[1].into(),
         "-f".into(),
         "rawvideo".into(),
         "-pix_fmt".into(),

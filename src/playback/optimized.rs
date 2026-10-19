@@ -1063,7 +1063,9 @@ fn prepare(root: &Path, job: &Job, cancel: &AtomicBool, allowance: u64) -> Resul
     let partial = root.join(format!("{}.partial.mkv", job.key));
     let final_path = root.join(format!("{}.mkv", job.key));
     let result = (|| {
-        run(&find_ffmpeg()?, &[
+        let ffmpeg = find_ffmpeg()?;
+        let timing = crate::media_engine::passthrough_args(&ffmpeg)?;
+        run(&ffmpeg, &[
             "-y".into(), "-nostdin".into(), "-v".into(), "error".into(), "-xerror".into(),
             "-filter_threads".into(), "1".into(), "-ss".into(), format!("{seek:.12}"),
             "-threads".into(), "2".into(), "-i".into(),media.path.display().to_string(),
@@ -1072,7 +1074,7 @@ fn prepare(root: &Path, job: &Job, cancel: &AtomicBool, allowance: u64) -> Resul
             "-c:v".into(),"mjpeg".into(),"-q:v".into(),"3".into(),"-threads".into(),"2".into(),
             "-pix_fmt".into(),"yuvj444p".into(),"-color_range".into(),"pc".into(),"-colorspace".into(),"bt709".into(),
             "-fs".into(),allowance.to_string(),
-            "-vsync".into(),"0".into(),"-f".into(),"matroska".into(),partial.display().to_string()
+            timing[0].into(),timing[1].into(),"-f".into(),"matroska".into(),partial.display().to_string()
         ],cancel)?;
         let check = run(
             &probe,

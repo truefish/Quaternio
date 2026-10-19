@@ -45,6 +45,32 @@ pub fn command(path: &Path) -> Command {
     command
 }
 
+type TimingStamp = (PathBuf, u64, Option<SystemTime>);
+type TimingArgs = [&'static str; 2];
+static TIMING_OPTIONS: OnceLock<Mutex<Vec<(TimingStamp, TimingArgs)>>> = OnceLock::new();
+
+fn timing_from_help(help: &str) -> Result<TimingArgs, String> {
+    let supports = |name: &str| help.lines().any(|line| line.split_whitespace().next().is_some_and(|option| option == name || option.strip_prefix(name).is_some_and(|suffix| suffix.starts_with("[:"))));
+    if supports("-fps_mode") { Ok(["-fps_mode", "passthrough"]) }
+    else if supports("-vsync") { Ok(["-vsync", "0"]) }
+    else { Err("FFmpeg lacks frame-timing passthrough support; select another installation in Media engine setup".into()) }
+}
+
+/// Prefer the current output option, falling back only for older installations.
+pub fn passthrough_args(ffmpeg: &Path) -> Result<TimingArgs, String> {
+    let metadata = fs::metadata(ffmpeg).map_err(|e| e.to_string())?;
+    let stamp = (ffmpeg.to_path_buf(), metadata.len(), metadata.modified().ok());
+    let cache = TIMING_OPTIONS.get_or_init(Default::default);
+    if let Some((_, args)) = cache.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(key, _)| key == &stamp) {
+        return Ok(*args);
+    }
+    let args = timing_from_help(&output(ffmpeg, &["-hide_banner", "-h", "full"])?)?;
+    let mut entries = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if entries.len() >= 32 { entries.clear(); }
+    entries.push((stamp, args));
+    Ok(args)
+}
+
 /// Bounded output and deadline, including broken third-party installations.
 fn output(path: &Path, args: &[&str]) -> Result<String, String> {
     let mut child = command(path).args(args).stdin(Stdio::null())

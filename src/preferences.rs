@@ -38,6 +38,7 @@ pub struct Preferences {
     pub vim_navigation: bool,
     pub preview_hardware: bool,
     pub reviewer_name: String,
+    pub relay: crate::collaboration::peer::RelaySettings,
     pub track_density: i32,
     pub preview_cache: crate::playback::optimized::PreviewCacheSettings }
 
@@ -52,6 +53,7 @@ impl Default for Preferences {
             vim_navigation: false,
             preview_hardware: true,
             reviewer_name: "Editor".into(),
+            relay: crate::collaboration::peer::RelaySettings{use_public:true,..Default::default()},
             track_density: 0,
             preview_cache: Default::default() }
     }

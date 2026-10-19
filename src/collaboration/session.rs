@@ -8,7 +8,7 @@ use super::{OperationId,document::{self,Authority,Document,Member,Patch,Applied,
 use crate::project::Project;
 
 #[derive(Clone,Serialize,Deserialize)]
-pub struct Participant{pub id:String,pub name:String,pub editor:bool,pub state:String}
+pub struct Participant{pub id:String,pub name:String,pub editor:bool,pub state:String,#[serde(default)]pub route:String}
 #[derive(Clone,Serialize,Deserialize)]
 pub struct Invitation{version:u32,pub peer:String,pub epoch:String,secret:String,pub member:Member,description:RTCSessionDescription}
 #[derive(Serialize,Deserialize)]
@@ -20,6 +20,13 @@ fn decode(code:&str)->Result<Signal,String>{
     let bytes=URL_SAFE_NO_PAD.decode(body).map_err(|_|"Invalid connection code".to_string())?;
     serde_json::from_slice(&bytes).map_err(|e|e.to_string())
 }
+fn validate_invitation(invite:&Invitation)->Result<(),String>{
+        if invite.version!=1||uuid::Uuid::parse_str(&invite.peer).is_err()||uuid::Uuid::parse_str(&invite.epoch).is_err()||invite.secret.len()!=64
+            ||invite.member.limit.checked_sub(invite.member.first)!=Some(ID_BLOCK)||invite.member.limit>=i32::MAX as u64||invite.member.name.chars().count()>80 {
+            return Err("Invalid or unsupported session invitation".into());
+        }
+    Ok(())
+}
 pub enum Event{
     Ready{epoch:String,actor:String,member:Member,document:Document,revision:u64,next_sequence:u64,host:bool},
     Code(String),Conflict(String),Commit(Applied),Rejected{ id:OperationId,reason:String },Participants(Vec<Participant>),Status(String),Ended(String),
@@ -27,20 +34,21 @@ pub enum Event{
 enum Command{Invite(String,bool),Signal(String),Propose(Patch,Document),Undo(OperationId),Redo(OperationId),Revoke(String),Stop}
 pub struct Session{tx:Option<SyncSender<Command>>,pub rx:Receiver<Event>,thread:Option<std::thread::JoinHandle<()>>}
 impl Session{
-    fn spawn(initial:Initial)->Result<Self,String>{
+    fn spawn(initial:Initial,relay:super::peer::RelaySettings)->Result<Self,String>{
         let(tx,commands)=mpsc::sync_channel(128);let(events,rx)=mpsc::sync_channel(256);
         let thread=std::thread::Builder::new().name("quaternio-session".into()).spawn(move||{
-            if let Err(error)=run(initial,commands,events.clone()){let _=events.try_send(Event::Ended(error));}
+            if let Err(error)=run(initial,commands,events.clone(),relay){let _=events.try_send(Event::Ended(error));}
         }).map_err(|e|e.to_string())?;Ok(Self{tx:Some(tx),rx,thread:Some(thread)})
     }
-    pub fn host(project:Project,name:String)->Result<Self,String>{if name.trim().is_empty()||name.chars().count()>80{return Err("Enter a host name between 1 and 80 characters".into());}Self::spawn(Initial::Host(project,name))}
-    pub fn join(code:&str)->Result<Self,String>{
+    pub fn host(project:Project,name:String)->Result<Self,String>{Self::host_with_relay(project,name,Default::default())}
+    pub fn host_with_relay(project:Project,name:String,relay:super::peer::RelaySettings)->Result<Self,String>{relay.validate()?;if name.trim().is_empty()||name.chars().count()>80{return Err("Enter a host name between 1 and 80 characters".into());}Self::spawn(Initial::Host(project,name),relay)}
+    pub fn join(code:&str)->Result<Self,String>{Self::join_with_relay(code,Default::default())}
+    pub fn join_with_relay(code:&str,relay:super::peer::RelaySettings)->Result<Self,String>{
+        if let Some(invite)=super::signaling::parse(code)?{return Self::spawn(Initial::JoinRoom(invite),relay);}
+        relay.validate()?;
         let Signal::Offer(invite)=decode(code)? else{return Err("Join requires an invitation, not an answer".into());};
-        if invite.version!=1||uuid::Uuid::parse_str(&invite.peer).is_err()||uuid::Uuid::parse_str(&invite.epoch).is_err()||invite.secret.len()!=64
-            ||invite.member.limit.checked_sub(invite.member.first)!=Some(ID_BLOCK)||invite.member.limit>=i32::MAX as u64||invite.member.name.chars().count()>80 {
-            return Err("Invalid or unsupported session invitation".into());
-        }
-        Self::spawn(Initial::Join(invite))
+        validate_invitation(&invite)?;
+        Self::spawn(Initial::Join(invite),relay)
     }
     fn command(&self,c:Command)->Result<(),String>{self.tx.as_ref().ok_or("Session stopped")?.try_send(c).map_err(|_|"Session is stopped or busy; local edits are retained".into())}
     pub fn invite(&self,name:String,editor:bool)->Result<(),String>{self.command(Command::Invite(name,editor))}
@@ -54,15 +62,16 @@ impl Drop for Session{fn drop(&mut self){
     if let Some(tx)=self.tx.take(){let _=tx.try_send(Command::Stop);drop(tx);}
     if let Some(thread)=self.thread.take(){let _=thread.join();}
 }}
-enum Initial{Host(Project,String),Join(Invitation)}
+enum Initial{Host(Project,String),Join(Invitation),JoinRoom(super::signaling::Invite)}
 #[derive(Serialize,Deserialize)]
 enum Wire{
     Hello{version:u32,epoch:String,secret:String},
     Snapshot{epoch:String,actor:String,member:Member,document:Document,revision:u64,next_sequence:u64,participants:Vec<Participant>},
     Propose(Patch),Undo(OperationId),Redo(OperationId),Commit(Applied),Rejected{id:OperationId,reason:String},Participants(Vec<Participant>),Goodbye(String),
 }
-struct Peer{secret:String,member:Member,authenticated:bool,opened:Option<Instant>,revoked:bool}
+struct Peer{secret:String,member:Member,authenticated:bool,opened:Option<Instant>,revoked:bool,route:String}
 struct Worker{
+    signaling:super::signaling::Tasks,service:Option<super::signaling::Service>,guest_room:Option<super::signaling::Invite>,
     transport:Transport,events:SyncSender<Event>,authority:Option<Authority>,audit:Option<Audit>,actor:String,
     outbox:Option<super::outbox::Outbox>,invite:Option<Invitation>,peers:BTreeMap<String,Peer>,finished:bool,
 }
@@ -71,7 +80,7 @@ impl Worker{
     fn send(&self,peer:&str,message:&Wire)->Result<(),String>{self.transport.send(peer.into(),serde_json::to_vec(message).map_err(|e|e.to_string())?)}
     fn participants(&self)->Vec<Participant>{
         if let Some(authority)=&self.authority {
-            authority.members.iter().map(|(id,m)|Participant{id:id.clone(),name:m.name.clone(),editor:m.editor,state:if id==&self.actor{"Host".into()}else if let Some(p)=self.peers.get(id){if p.revoked{"Revoked"}else if p.authenticated{"Connected"}else{"Invited"}.into()}else{"Disconnected".into()}}).collect()
+            authority.members.iter().map(|(id,m)|Participant{id:id.clone(),name:m.name.clone(),editor:m.editor,state:if id==&self.actor{"Host".into()}else if let Some(p)=self.peers.get(id){if p.revoked{"Revoked"}else if p.authenticated{"Connected"}else{"Invited"}.into()}else{"Disconnected".into()},route:self.peers.get(id).map(|p|p.route.clone()).unwrap_or_default()}).collect()
         }else{Vec::new()}
     }
     fn publish_participants(&mut self)->Result<(),String>{let participants=self.participants();self.broadcast(&Wire::Participants(participants.clone()));self.emit(Event::Participants(participants))}
@@ -89,7 +98,7 @@ impl Worker{
         let peer=uuid::Uuid::new_v4().to_string();let member=Member{name:name.into(),editor,first,limit:first+ID_BLOCK};
         self.audit.as_mut().unwrap().append(&Record::Member{actor:peer.clone(),member:member.clone()})?;authority.members.insert(peer.clone(),member.clone());
         let secret=format!("{}{}",uuid::Uuid::new_v4().simple(),uuid::Uuid::new_v4().simple());
-        self.peers.insert(peer.clone(),Peer{secret,member,authenticated:false,opened:None,revoked:false});self.transport.offer(peer)?;
+        self.peers.insert(peer.clone(),Peer{secret,member,authenticated:false,opened:None,revoked:false,route:String::new()});self.transport.offer(peer)?;
         self.emit(Event::Status("Creating your invitation…".into()))?;self.publish_participants()
     }
     fn edit(&mut self,actor:&str,kind:EditKind)->Result<(),String>{
@@ -150,7 +159,10 @@ impl Worker{
         PeerEvent::Description{peer,description,offer}=>{
             let signal=if offer{let p=self.peers.get(&peer).ok_or("Invitation expired")?;Signal::Offer(Invitation{version:1,peer,epoch:self.authority.as_ref().unwrap().epoch.clone(),secret:p.secret.clone(),member:p.member.clone(),description})}
                 else{let invite=self.invite.as_ref().unwrap();Signal::Answer{version:1,peer,epoch:invite.epoch.clone(),description}};
-            self.emit(Event::Code(encode(&signal)?))
+            let code=encode(&signal)?;
+            if offer {if let Some(service)=self.service.clone(){return self.signaling.publish(service,code);}}
+            else if let Some(room)=&self.guest_room{room.answer(code)?;return self.emit(Event::Status("Invite accepted. Connecting automatically…".into()));}
+            self.emit(Event::Code(code))
         },
         PeerEvent::Opened(peer)=>{
             if self.authority.is_some(){if let Some(p)=self.peers.get_mut(&peer){p.opened=Some(Instant::now());}}
@@ -161,6 +173,11 @@ impl Worker{
             if let Err(error)=self.message(&peer,&bytes.bytes){self.transport.close(peer.clone());if self.authority.is_none(){self.finished=true;self.emit(Event::Ended(error))}else{if let Some(p)=self.peers.get_mut(&peer){p.authenticated=false;}self.emit(Event::Status(error))}}else{Ok(())}
         },
         PeerEvent::State(_,state)=>self.emit(Event::Status(state)),
+        PeerEvent::Route(peer,relayed)=>{
+            let route=if relayed{"Relayed"}else{"Direct"};
+            if let Some(p)=self.peers.get_mut(&peer){p.route=route.into();self.publish_participants()?;}
+            self.emit(Event::Status(format!("Connected · {route}")))
+        },
         PeerEvent::Error(peer,reason)=>{
             self.transport.close(peer.clone());
             if self.authority.is_none(){self.finished=true;self.emit(Event::Ended(format!("Peer connection failed: {reason}")))}
@@ -195,8 +212,19 @@ impl Worker{
     }}
 }
 enum EditKind{Propose(Patch),Undo(OperationId),Redo(OperationId)}
-fn run(initial:Initial,commands:Receiver<Command>,events:SyncSender<Event>)->Result<(),String>{
-    let mut worker=Worker{transport:Transport::new()?,events,authority:None,audit:None,actor:String::new(),outbox:None,invite:None,peers:BTreeMap::new(),finished:false};
+fn run(initial:Initial,commands:Receiver<Command>,events:SyncSender<Event>,relay:super::peer::RelaySettings)->Result<(),String>{
+    let mut guest_room=None;
+    let mut public_offline=false;
+    let (initial,relay,service)=match initial{
+        Initial::JoinRoom(room)=>{let(code,mut config)=room.fetch()?;let Signal::Offer(invite)=decode(&code)? else{return Err("Relay returned an invalid invitation".into())};validate_invitation(&invite)?;config.relay_only|=relay.relay_only;guest_room=Some(room);(Initial::Join(invite),config,None)},
+        Initial::Join(invite) if relay.uses_public()=>(Initial::Join(invite),relay,None),
+        initial=>{match super::signaling::Service::configure(&relay){
+            Ok(Some((service,config)))=>(initial,config,Some(service)),Ok(None)=>(initial,relay,None),
+            Err(_) if relay.uses_public()&&!relay.relay_only=>{public_offline=true;(initial,super::peer::RelaySettings::default(),None)},
+            Err(error)=>return Err(error),
+        }}
+    };
+    let mut worker=Worker{signaling:super::signaling::Tasks::new(),service,guest_room,transport:Transport::new(relay)?,events,authority:None,audit:None,actor:String::new(),outbox:None,invite:None,peers:BTreeMap::new(),finished:false};
     match initial{
         Initial::Host(project,name)=>{
             let epoch=uuid::Uuid::new_v4().to_string();let actor=uuid::Uuid::new_v4().to_string();let first=(project.next_id/ID_BLOCK+1)*ID_BLOCK;
@@ -208,8 +236,10 @@ fn run(initial:Initial,commands:Receiver<Command>,events:SyncSender<Event>)->Res
             worker.actor=actor.clone();worker.emit(Event::Ready{epoch,actor,member,document:authority.document.clone(),revision:0,next_sequence:1,host:true})?;
             worker.authority=Some(authority);worker.audit=Some(audit);worker.publish_participants()?;
         },
-        Initial::Join(invite)=>{worker.actor=invite.peer.clone();worker.transport.answer(invite.peer.clone(),invite.description.clone())?;worker.invite=Some(invite);worker.emit(Event::Status("Preparing your reply…".into()))?;},
+        Initial::JoinRoom(_)=>unreachable!("Room invitation was resolved before creating the transport"),
+        Initial::Join(invite)=>{worker.actor=invite.peer.clone();worker.transport.answer(invite.peer.clone(),invite.description.clone())?;worker.invite=Some(invite);worker.emit(Event::Status(if worker.guest_room.is_some(){"Connecting to the host…"}else{"Preparing your reply…"}.into()))?;},
     }
+    if public_offline{worker.emit(Event::Status("Public service unavailable. Direct/LAN invitations still work using invitation and reply files.".into()))?;}
     while !worker.finished{
         for _ in 0..32{match commands.try_recv(){Ok(c)=>{
             let id=match &c{Command::Propose(p,_)=>Some(p.id.clone()),Command::Undo(id)|Command::Redo(id)=>Some(id.clone()),_=>None};
@@ -218,6 +248,12 @@ fn run(initial:Initial,commands:Receiver<Command>,events:SyncSender<Event>)->Res
                 worker.emit(Event::Rejected{id,reason:error})?;
             }else{worker.emit(Event::Status(error))?;}}
         },Err(mpsc::TryRecvError::Disconnected)=>{worker.finished=true;break;},Err(_)=>break}}
+        for _ in 0..16{match worker.signaling.rx.try_recv(){
+            Ok(super::signaling::Event::Code(code))=>worker.emit(Event::Code(code))?,
+            Ok(super::signaling::Event::Answer(code))=>{if let Err(error)=worker.command(Command::Signal(code)){worker.emit(Event::Status(error))?;}},
+            Ok(super::signaling::Event::Error(error))=>worker.emit(Event::Status(error))?,
+            Err(_)=>break,
+        }}
         for _ in 0..32{match worker.transport.rx.try_recv(){Ok(e)=>worker.peer_event(e)?,Err(mpsc::TryRecvError::Disconnected)=>return Err("Peer transport stopped".into()),Err(_)=>break}}
         let expired:Vec<_>=worker.peers.iter().filter(|(_,p)|!p.authenticated&&p.opened.is_some_and(|at|at.elapsed()>Duration::from_secs(15))).map(|(id,_)|id.clone()).collect();
         for id in expired{worker.transport.close(id);}

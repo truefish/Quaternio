@@ -379,6 +379,7 @@ component VerticalMeter inherits Rectangle {
 }
 
 component Field inherits Rectangle {
+    in property <bool> secret: false;
     in-out property <string> value;
     in property <string> placeholder: "";
     in property <bool> enabled: true;
@@ -387,6 +388,7 @@ component Field inherits Rectangle {
     height: 28px; border-radius: 3px; background: root.enabled ? Palette.bg0 : Palette.bg2; border-width: 1px; border-color: input.has-focus ? Palette.accent : Palette.bg3;
     Text { text: root.value == "" ? root.placeholder : ""; x: 7px; width: parent.width - 14px; height: 100%; color: Palette.text-secondary; font-size: 12px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; }
     input := TextInput {
+                input-type: root.secret ? InputType.password : InputType.text;
                 enabled: root.enabled; edited => { root.edited(); }
                 Timer { interval: 150ms; running: input.has-focus; triggered => { LiveFocus.heartbeat(); } }
                 property <bool> live-focus-counted: false; x: 7px; width: parent.width - 14px; height: 100%; text <=> root.value; color: root.enabled ? Palette.text-primary : Palette.text-disabled; font-size: 12px; font-weight: 400; horizontal-alignment: left; vertical-alignment: center; single-line: true; changed has-focus => { if (self.has-focus != self.live-focus-counted) { self.live-focus-counted = self.has-focus; if (self.has-focus) { LiveFocus.input-gained(); } else { LiveFocus.input-lost(); } }  if (self.has-focus) { root.focused(); } } }
@@ -1300,6 +1302,10 @@ component ToolBtn inherits Rectangle {
 }
 
 component ConnectionText inherits Rectangle {
+    out property <bool> copied: false;
+    callback copy-code();
+    copy-code => { input.select-all(); input.copy(); root.copied = true; }
+    changed value => { root.copied = false; }
     in-out property <string> value;
     in property <bool> read-only: false;
     height: 76px; background: Palette.bg0; border-radius: 3px; border-width: 1px; border-color: input.has-focus ? Palette.accent : Palette.bg3; clip: true;
@@ -1630,6 +1636,17 @@ export component AppWindow inherits Window {
     out property <bool> modal-open: root.show-dialog || root.show-prefs || root.show-about
         || root.show-import-mode || root.show-import-report || root.show-update-agree
         || root.show-sequence-match || root.capturing-binding || root.show-export-details || root.show-engine-setup;
+    in property <bool> session-auto-connect: false;
+    in property <bool> session-simple-code: false;
+    in-out property <bool> session-use-public: true;
+    in-out property <string> session-service-url;
+    in-out property <string> session-service-key;
+    in-out property <bool> session-show-manual-relay: false;
+    in-out property <bool> session-show-relay: false;
+    in-out property <string> session-relay-url;
+    in-out property <string> session-relay-user;
+    in-out property <string> session-relay-password;
+    in-out property <bool> session-relay-only: false;
     in-out property <bool> show-session: false;
     in-out property <bool> session-show-codes: false;
     in-out property <bool> session-show-recovery: false;
@@ -2907,10 +2924,11 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                 }
                 Flickable { vertical-stretch: 1; viewport-width: self.width; viewport-height: session-content.preferred-height;
                     session-content := VerticalLayout { width: parent.width; spacing: 12px;
-                        Text { text: root.session-status == "" ? "Edit together. Start with your project, or open an invitation from someone else." : root.session-status; color: Palette.text-primary; font-size: 13px; wrap: word-wrap; }
+                        Text { text: root.session-status == "" ? "Start a session with this project, or paste an invite code to join someone." : root.session-status; color: Palette.text-primary; font-size: 13px; wrap: word-wrap; }
                         if !root.session-active: Field { value <=> root.session-name; placeholder: "Your name"; }
                         if !root.session-active: PriBtn { label: "Start a session"; clicked => { root.command("session-host"); } }
-                        if !root.session-active: SecBtn { label: "Join from invitation…"; clicked => { root.command("session-open-invitation"); } }
+                        if !root.session-active: SecBtn { label: root.session-show-codes ? "Hide join form" : "Join with code"; clicked => { root.session-show-codes = !root.session-show-codes; } }
+                        if !root.session-active: TextBtn { label: "Open an invitation file…"; clicked => { root.command("session-open-invitation"); } }
                         if root.session-active && root.session-host: Rectangle {
                             min-height: invite-content.preferred-height + 20px; background: Palette.bg2; border-radius: 4px;
                             invite-content := VerticalLayout { padding: 10px; spacing: 8px;
@@ -2922,17 +2940,20 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                                 }
                             }
                         }
-                        if root.session-code != "" && (root.session-host || !root.session-connected): Text { text: root.session-host ? "1. Save the invitation and send it privately.\n2. Open their reply to connect." : "Save your reply and send it back. The host opens it to finish connecting."; color: Palette.text-secondary; font-size: 13px; wrap: word-wrap; }
-                        if root.session-code != "" && (root.session-host || !root.session-connected): PriBtn { label: root.session-host ? "Save invitation…" : "Save reply…"; clicked => { root.command("session-save-code"); } }
-                        if root.session-host: SecBtn { label: "Open their reply…"; clicked => { root.command("session-open-reply"); } }
-                        if !root.session-active || root.session-host || !root.session-connected: TextBtn { label: root.session-show-codes ? "Hide connection codes" : "Use a code instead"; clicked => { root.session-show-codes = !root.session-show-codes; } }
-                        if root.session-show-codes: VerticalLayout { spacing: 8px;
-                            if !root.session-active || root.session-host: Text { text: root.session-host ? "Paste their reply" : "Paste an invitation"; color: Palette.text-secondary; font-size: 12px; }
-                            if !root.session-active || root.session-host: ConnectionText { value <=> root.session-input; }
+                        if root.session-code != "" && (root.session-host || !root.session-connected): Text { text: root.session-simple-code ? "Send this invite code privately. Your guest pastes it into Join with code to connect automatically." : root.session-host ? "1. Save the invitation and send it privately.\n2. Open their reply to connect." : "Save your reply and send it back. The host opens it to finish connecting."; color: Palette.text-secondary; font-size: 13px; wrap: word-wrap; }
+                        if root.session-code != "" && !root.session-simple-code && (root.session-host || !root.session-connected): PriBtn { label: root.session-host ? "Save invitation…" : "Save reply…"; clicked => { root.command("session-save-code"); } }
+                        if root.session-host && !root.session-auto-connect: SecBtn { label: "Open their reply…"; clicked => { root.command("session-open-reply"); } }
+                        if root.session-active && !root.session-simple-code && (root.session-host || !root.session-connected): TextBtn { label: root.session-show-codes ? "Hide connection codes" : "Show connection code"; clicked => { root.session-show-codes = !root.session-show-codes; } }
+                        if root.session-show-codes || root.session-simple-code: VerticalLayout { spacing: 8px;
+                            if !root.session-active || (root.session-host && !root.session-auto-connect): Text { text: root.session-host ? "Paste their reply" : "Paste an invitation"; color: Palette.text-secondary; font-size: 12px; }
+                            if !root.session-active || (root.session-host && !root.session-auto-connect): ConnectionText { value <=> root.session-input; }
                             if !root.session-active: SecBtn { label: "Join with code"; enabled: root.session-input != ""; clicked => { root.command("session-join"); } }
-                            if root.session-host: SecBtn { label: "Connect with reply"; enabled: root.session-input != ""; clicked => { root.command("session-accept"); } }
-                            if root.session-code != "": Text { text: root.session-host ? "Your invitation code" : "Your reply code"; color: Palette.text-secondary; font-size: 12px; }
-                            if root.session-code != "": ConnectionText { value: root.session-code; read-only: true; }
+                            if root.session-host && !root.session-auto-connect: SecBtn { label: "Connect with reply"; enabled: root.session-input != ""; clicked => { root.command("session-accept"); } }
+                            if root.session-code != "": Text { text: root.session-simple-code ? "Invite code" : root.session-host ? "Your invitation code" : "Your reply code"; color: Palette.text-secondary; font-size: 12px; }
+                            if root.session-code != "": VerticalLayout { spacing: 8px;
+                                outgoing-code := ConnectionText { value: root.session-code; read-only: true; }
+                                PriBtn { label: outgoing-code.copied ? "Copied" : "Copy invite code"; clicked => { outgoing-code.copy-code(); } }
+                            }
                         }
                         for peer in root.session-peers: Rectangle {
                             height: 54px; background: Palette.bg2; border-radius: 4px;
@@ -2944,11 +2965,27 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                                 if peer.revocable: TextBtn { label: "Remove"; clicked => { root.command("session-revoke:" + peer.id); } }
                             }
                         }
-                        Text { text: "Everyone needs their own copy of the footage. You can browse and play independently."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                        Text { text: "This beta shares project edits. Host-streamed media previews are not available yet."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
                         if root.session-readonly: Text { text: "Editing is paused while connecting or disconnected. Viewers cannot edit."; color: Palette.status-warning; font-size: 12px; wrap: word-wrap; }
                         if root.session-issues != "": Text { text: "Edits that need attention"; color: Palette.text-primary; font-size: 13px; font-weight: 600; }
                         if root.session-issues != "": Text { text: root.session-issues; color: Palette.status-warning; font-size: 12px; wrap: word-wrap; }
                         if root.session-has-branch: SecBtn { label: "Save my edits as a project…"; clicked => { root.command("session-save-branch"); } }
+                        if !root.session-active: TextBtn { label: root.session-show-relay ? "Hide connection options" : "Connection options · restricted networks"; clicked => { root.session-show-relay = !root.session-show-relay; } }
+                        if !root.session-active && root.session-show-relay: VerticalLayout { spacing: 8px;
+                            SecBtn { label: root.session-use-public ? "Public service: On · automatic" : "Public service: Off · direct/manual"; clicked => { root.session-use-public = !root.session-use-public; } }
+                            Text { text: "Public service is optional. Leave the custom address empty to use it; guests only need an invite code."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                            Field { value <=> root.session-service-url; placeholder: "Service address, e.g. https://relay.example.com"; }
+                            Field { value <=> root.session-service-key; placeholder: "Private access key · kept until app closes"; secret: true; }
+                            TextBtn { label: root.session-show-manual-relay ? "Hide manual TURN settings" : "Advanced: existing TURN server"; clicked => { root.session-show-manual-relay = !root.session-show-manual-relay; } }
+                            if root.session-show-manual-relay: VerticalLayout { spacing: 8px;
+                                Text { text: "Leave the service address empty to use manual TURN settings. Invitations then need a reply."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                                Field { value <=> root.session-relay-url; placeholder: "TURN address, e.g. turn:relay.example.com:3478"; }
+                                Field { value <=> root.session-relay-user; placeholder: "Relay username"; }
+                                Field { value <=> root.session-relay-password; placeholder: "Relay password · kept until app closes"; secret: true; }
+                            }
+                            SecBtn { label: root.session-relay-only ? "Connection: Relay only" : "Connection: Auto · direct or relay"; clicked => { root.session-relay-only = !root.session-relay-only; } }
+                            SecBtn { label: "Apply connection settings"; clicked => { root.command("session-relay-save"); } }
+                        }
                         if !root.session-active: TextBtn { label: root.session-show-recovery ? "Hide recovery options" : "Recover a previous session"; clicked => { root.session-show-recovery = !root.session-show-recovery; } }
                         if !root.session-active && root.session-show-recovery: VerticalLayout { spacing: 8px;
                             SecBtn { label: "Recover a session I hosted…"; clicked => { root.command("session-recover-host"); } }

@@ -466,7 +466,7 @@ pub(super) fn resident_available(
     command.args(["-an", "-filter_complex"]).arg(resident_filter(plan, settings, encoder))
         .args(["-map", "[v]", "-frames:v"]).arg(plan.frame_count.min(6).to_string())
         .arg("-enc_time_base:v").arg(format!("{}/{}", settings.frame_rate.den, settings.frame_rate.num))
-        .args(["-vsync", "0"]);
+        .args(crate::media_engine::passthrough_args(ffmpeg)?);
     encoder.configure(&mut command, settings);
     command.args(["-f", "h264", "pipe:1"]);
     // Long source trims may time out. Conservatively use the ordinary route;

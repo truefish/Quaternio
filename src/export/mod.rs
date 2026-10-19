@@ -980,8 +980,9 @@ fn export_direct(
     command
         .args(["-filter_complex_threads", "2", "-filter_complex"])
         .arg(format!("{video_filter};{audio_filter}"))
-        .args(["-map", "[v]", "-map", "[a]", "-enc_time_base:v", &time_base,
-            "-vsync", "0", "-frames:v"])
+        .args(["-map", "[v]", "-map", "[a]", "-enc_time_base:v", &time_base])
+        .args(crate::media_engine::passthrough_args(ffmpeg)?)
+        .arg("-frames:v")
         .arg(plan.frame_count.to_string());
     encoder.configure(&mut command, settings);
     if !gpu_resident {

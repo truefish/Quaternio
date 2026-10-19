@@ -304,7 +304,8 @@ pub(super) fn render(
         .args(["-map", "[v]", "-map", "[a]", "-enc_time_base:v"])
         .arg(format!("{}/{}", plan.rate.den, plan.rate.num))
         // Passthrough prevents an early source EOF being hidden by duplicated frames.
-        .args(["-vsync", "0", "-frames:v"]).arg(plan.frame_count.to_string());
+        .args(crate::media_engine::passthrough_args(ffmpeg)?)
+        .arg("-frames:v").arg(plan.frame_count.to_string());
     encoder.configure(&mut command, settings);
     encoder.configure_pixel_format(&mut command);
     command.args(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t"])

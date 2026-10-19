@@ -18,9 +18,10 @@ pub(super) fn can_undo(state:&AppState)->bool{state.collaboration.bridge.as_ref(
 pub(super) fn can_redo(state:&AppState)->bool{state.collaboration.bridge.as_ref().is_some_and(|b|b.connected&&b.member.editor&&!b.history_pending&&b.redo>0)}
 pub(super) fn sync(ui:&AppWindow,state:&AppState){
     let current=&state.collaboration;ui.set_session_connected(current.bridge.as_ref().is_some_and(|b|b.connected));ui.set_session_active(current.service.is_some());ui.set_session_readonly(readonly(state));
+    ui.set_session_auto_connect(if current.code.is_empty(){!state.preferences.relay.service_url.is_empty()||state.preferences.relay.uses_public()}else{current.code.starts_with("quaternio-join-v1:")});ui.set_session_simple_code(current.code.starts_with("quaternio-join-v1:"));
     ui.set_session_host(current.bridge.as_ref().is_some_and(|b|b.host));ui.set_session_status(current.status.clone().into());
     ui.set_session_code(current.code.clone().into());ui.set_session_issues(current.issues.iter().rev().take(16).map(|text|text.chars().take(2048).collect::<String>()).collect::<Vec<_>>().join("\n\n").into());ui.set_session_has_branch(!current.branches.is_empty());
-    ui.set_session_peers(model(current.participants.iter().map(|p|PeerItem{id:p.id.clone().into(),name:p.name.clone().into(),role:if p.editor{"Editor"}else{"Viewer"}.into(),state:p.state.clone().into(),revocable:current.bridge.as_ref().is_some_and(|b|b.host&&b.actor!=p.id)&&p.state!="Revoked"}).collect()));
+    ui.set_session_peers(model(current.participants.iter().map(|p|PeerItem{id:p.id.clone().into(),name:p.name.clone().into(),role:if p.editor{"Editor"}else{"Viewer"}.into(),state:if p.state=="Connected"&&!p.route.is_empty(){format!("{} · {}",p.state,p.route)}else{p.state.clone()}.into(),revocable:current.bridge.as_ref().is_some_and(|b|b.host&&b.actor!=p.id)&&p.state!="Revoked"}).collect()));
     if active(state){ui.set_can_undo(can_undo(state));ui.set_can_redo(can_redo(state));}
     ui.set_session_revision(current.bridge.as_ref().map(|b|format!("Revision {} · {} pending",b.revision,b.pending.len())).unwrap_or_default().into());
 }
@@ -74,7 +75,7 @@ fn open_connection(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>,path:&s
     Ok(())
 }
 pub(super) fn handle(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>,command:&str)->bool{
-    if command=="session"{ui.set_show_session(!ui.get_show_session());ui.set_show_review(false);ui.set_show_activity(false);if ui.get_session_name().is_empty(){ui.set_session_name(state.borrow().preferences.reviewer_name.clone().into());}sync(ui,&state.borrow());return true;}
+    if command=="session"{let relay=state.borrow().preferences.relay.clone();ui.set_session_use_public(relay.use_public);ui.set_session_service_url(relay.service_url.into());ui.set_session_service_key(relay.access_key.into());ui.set_session_relay_url(relay.url.into());ui.set_session_relay_user(relay.username.into());ui.set_session_relay_password(relay.password.into());ui.set_session_relay_only(relay.relay_only);ui.set_show_session(!ui.get_show_session());ui.set_show_review(false);ui.set_show_activity(false);if ui.get_session_name().is_empty(){ui.set_session_name(state.borrow().preferences.reviewer_name.clone().into());}sync(ui,&state.borrow());return true;}
     if active(&state.borrow())&&matches!(command,"undo"|"redo"){
         if state.borrow().pointer.down{let mut s=state.borrow_mut();s.editor.cancel_gesture();s.pointer.finish();note_borrowed(&mut s);drop(s);full_sync(ui,state);return true;}
         let result=(||{
@@ -94,16 +95,23 @@ pub(super) fn handle(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>,comma
     }
     if !command.starts_with("session-"){return false;}
     let result:Result<(),String>=(||{match command{
+        "session-relay-save"=>{
+            if active(&state.borrow()){return Err("Leave the session before changing connection settings".into());}
+            let relay=crate::collaboration::peer::RelaySettings{use_public:ui.get_session_use_public(),service_url:ui.get_session_service_url().trim().trim_end_matches('/').into(),access_key:ui.get_session_service_key().to_string(),url:ui.get_session_relay_url().trim().into(),username:ui.get_session_relay_user().to_string(),password:ui.get_session_relay_password().to_string(),relay_only:ui.get_session_relay_only(),..Default::default()};
+            relay.validate()?;
+            let mut s=state.borrow_mut();let mut preferences=s.preferences.clone();preferences.relay=relay;preferences.save()?;s.preferences=preferences;
+            s.collaboration.status="Connection settings saved. Public service is optional; private keys and passwords stay in memory until the app closes.".into();
+        },
         "session-host"=>{
             if active(&state.borrow()){return Err("Leave the current session first".into());}
             let s=state.borrow();if s.pointer.down||s.import_rx.is_some(){return Err("Finish the current drag or import before hosting".into());}
-            let service=Session::host(s.editor.project.clone(),ui.get_session_name().to_string())?;let generation=s.edit_gen;drop(s);
+            let service=Session::host_with_relay(s.editor.project.clone(),ui.get_session_name().to_string(),s.preferences.relay.clone())?;let generation=s.edit_gen;drop(s);
             state.borrow_mut().collaboration=State{service:Some(service),status:"Starting your session…".into(),start_gen:generation,observed_gen:generation,..Default::default()};
         },
         "session-join"=>{
             if active(&state.borrow()){return Err("Leave the current session first".into());}
             if !confirm_unsaved(ui,state){return Ok(());}
-            let service=Session::join(ui.get_session_input().as_str())?;let generation=state.borrow().edit_gen;
+            let service=Session::join_with_relay(ui.get_session_input().as_str(),state.borrow().preferences.relay.clone())?;let generation=state.borrow().edit_gen;
             state.borrow_mut().collaboration=State{service:Some(service),status:"Connecting…".into(),start_gen:generation,observed_gen:generation,..Default::default()};
         },
         "session-invite"=>state.borrow().collaboration.service.as_ref().ok_or("Host a session first")?.invite(ui.get_session_invitee().to_string(),ui.get_session_editor_role())?,
@@ -183,7 +191,7 @@ pub(super) fn pump(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
             s.collaboration.bridge=Some(Bridge{epoch,actor,member,revision,sequence:next_sequence,document,last,pending:Vec::new(),local_branch,connected:true,host,undo:Vec::new(),redo:0,history_pending:false});
             s.collaboration.status=if host{"Session started. Invite someone to edit with you."}else{"Connected. Your edits are shared automatically."}.into();note_borrowed(&mut s);
         },
-        Event::Code(code)=>{s.collaboration.code=code;s.collaboration.status=if s.collaboration.bridge.as_ref().is_some_and(|b|b.host){"Invitation ready. Save it and send it privately."}else{"Your reply is ready. Send it back to the host."}.into();},
+        Event::Code(code)=>{let simple=code.starts_with("quaternio-join-v1:");s.collaboration.code=code;s.collaboration.status=if simple{"Invite ready. Send the code privately; your guest can join immediately."}else if s.collaboration.bridge.as_ref().is_some_and(|b|b.host){"Invitation ready. Save it and send it privately."}else{"Your reply is ready. Send it back to the host."}.into();},
         Event::Participants(peers)=>s.collaboration.participants=peers,
         Event::Status(message)=>s.collaboration.status=match message.as_str(){"ICE New"|"ICE Checking"|"Peer New"|"Peer Connecting"=>"Connecting…".into(),"ICE Connected"|"ICE Completed"|"Peer Connected"=>"Connection established. Finishing setup…".into(),"ICE Disconnected"|"Peer Disconnected"=>"Connection interrupted. Rejoin with a new invitation.".into(),_=>message},
         Event::Conflict(reason)=>{if s.collaboration.issues.len()>=64{s.collaboration.issues.remove(0);}s.collaboration.issues.push(reason);},
