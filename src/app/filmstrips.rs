@@ -217,7 +217,25 @@ fn plan(state: &AppState, vertical: f32) -> Vec<CellPicture> {
     cells
 }
 
+pub(super) fn remote_next(ui:&AppWindow,state:&mut AppState)->Option<FilmstripRequest>{
+    let visible=ui.get_page()==0;let key=view_key(state,ui.get_timeline_scroll_y(),visible);
+    if state.filmstrips.key!=Some(key){
+        let cells=if visible{plan(state,ui.get_timeline_scroll_y())}else{Vec::new()};
+        state.filmstrips.pictures.retain(|(request,_)|cells.iter().any(|cell|cell.request.media==request.media));
+        state.filmstrips.cells=cells;state.filmstrips.key=Some(key);state.filmstrips.changed();
+    }
+    if state.playing||state.source.playing||state.pointer.down||state.program_request_pending||state.source_request_pending{return None;}
+    state.filmstrips.cells.iter().find(|cell|!state.filmstrips.pictures.iter().any(|(request,_)|*request==cell.request)).map(|cell|cell.request.clone())
+}
+pub(super) fn remote_complete(state:&mut AppState,request:FilmstripRequest,image:Option<ImageBuf>){
+    if !state.filmstrips.cells.iter().any(|cell|cell.request==request){return;}
+    state.filmstrips.pictures.retain(|(old,_)|*old!=request);
+    while state.filmstrips.pictures.len()>=IMAGE_LIMIT{state.filmstrips.pictures.pop_back();}
+    let image=image.unwrap_or_else(||ImageBuf::black(request.width,request.height));
+    state.filmstrips.pictures.push_front((request,Arc::new(image)));state.filmstrips.changed();
+}
 pub(super) fn pump(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    if collab::remote_filmstrips(ui,state){return;}
     let mut current = state.borrow_mut();
     let visible = ui.get_page() == 0 && !ui.get_live_reloading();
     let busy = current.playing

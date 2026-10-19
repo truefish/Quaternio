@@ -5,6 +5,8 @@ pub mod signaling;
 mod tunnel;
 pub mod session;
 pub mod outbox;
+pub mod media;
+mod transfers;
 
 use serde::{Deserialize, Serialize};
 

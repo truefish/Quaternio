@@ -2140,12 +2140,12 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             Some(())
         }
         Command::PlayPause => {
-            if !engine_setup::require(ui, state) { return; }
+            if !collab::guest(&state.borrow()) && !engine_setup::require(ui, state) { return; }
             toggle_play(state);
             Some(())
         }
         Command::ShuttleReverse => {
-            if !engine_setup::require(ui, state) { return; }
+            if !collab::guest(&state.borrow()) && !engine_setup::require(ui, state) { return; }
             shuttle(state, -1.0);
             Some(())
         }
@@ -2154,7 +2154,7 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             Some(())
         }
         Command::ShuttleForward => {
-            if !engine_setup::require(ui, state) { return; }
+            if !collab::guest(&state.borrow()) && !engine_setup::require(ui, state) { return; }
             shuttle(state, 1.0);
             Some(())
         }
@@ -2544,6 +2544,9 @@ fn stop_play(state: &Rc<std::cell::RefCell<AppState>>) {
 }
 
 fn set_speed(state: &Rc<std::cell::RefCell<AppState>>, speed: f64) {
+    if collab::guest(&state.borrow()){
+        let mut current=state.borrow_mut();current.audio.stop();current.source.stop();current.anchor_frame=current.editor.project.sequence.playhead;current.anchor_at=Instant::now();current.speed=speed;current.playing=speed!=0.;current.waiting_picture=current.playing;current.waiting_audio=false;return;
+    }
     let project = {
         let mut state = state.borrow_mut();
         state.source.stop();
@@ -3857,6 +3860,7 @@ fn same_waveform_source(a: &Media, b: &Media) -> bool {
         && a.duration_secs.to_bits() == b.duration_secs.to_bits()
 }
 fn pump_waveforms(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    if collab::remote_waveforms(ui,state){return;}
     let mut current = state.borrow_mut();
     current.waveform_engine.set_busy(current.playing || current.source.playing
         || current.program_request_pending || current.source_request_pending
@@ -3917,6 +3921,7 @@ fn waveform_row_visible(y: f32, height: f32, scroll: f32, viewport: f32) -> bool
 }
 
 fn waveform_picture(state: &AppState, clip: &Clip, x: f32, width: f32, height: f32) -> (slint::Image, f32, f32) {
+    if collab::guest(state){return collab::waveform_picture(state,clip,x,width,height);}
     let Some(media) = state.editor.project.media(clip.media_id) else { return (slint::Image::default(), 0.0, 0.0); };
     let Some((_, peaks)) = state.waveform_results.iter().find(|(m, _)| same_waveform_source(m, media)) else { return (slint::Image::default(), 0.0, 0.0); };
     let left = x.max(0.0);
@@ -3948,6 +3953,7 @@ fn waveform_picture(state: &AppState, clip: &Clip, x: f32, width: f32, height: f
 }
 
 fn pump_thumbnails(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    if collab::remote_thumbnails(ui,state){return;}
     let mut changed = false;
     let mut completed = false;
     let mut current = state.borrow_mut();
@@ -4045,6 +4051,7 @@ fn same_picture(a: &Media, b: &Media) -> bool {
 }
 
 fn pump_preview(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    if collab::remote_preview(ui,state,false){return;}
     if state.borrow().program_picture_reset {
         ui.set_show_picture(false);
         state.borrow_mut().program_picture_reset = false;
@@ -4433,6 +4440,7 @@ fn set_source_speed(state: &Rc<std::cell::RefCell<AppState>>, speed: f64) {
 }
 
 fn start_source_audio(current: &mut AppState) {
+    if collab::guest(current){current.source.remote_picture(current.source.frame);return;}
     if current.source.waiting_audio {
         if let Some(project) = current.source_project.clone() {
             if project.media.iter().any(|media| media.has_audio) {
@@ -4456,7 +4464,7 @@ fn start_source_audio(current: &mut AppState) {
 }
 
 fn on_source_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, action: &str) {
-    if matches!(action,"play-toggle"|"shuttle-j"|"shuttle-l") && !engine_setup::require(ui,state) { return; }
+    if matches!(action,"play-toggle"|"shuttle-j"|"shuttle-l") && !collab::guest(&state.borrow()) && !engine_setup::require(ui,state) { return; }
     pump_source_preview(ui, state);
     let selected = {
         let current = state.borrow();
@@ -5225,7 +5233,7 @@ fn bin_views(state: &AppState) -> Vec<BinItem> {
                 tc_out: tc_out.into(),
                 duration: duration.into(),
                 fps: fps.into(),
-                offline: state.media_availability.known(&media.path) == Some(false) }
+                offline: !collab::guest(state) && state.media_availability.known(&media.path) == Some(false) }
         })
         .collect()
 }
@@ -5473,6 +5481,7 @@ fn source_project(media: &Media) -> Project {
 }
 
 fn pump_source_preview(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    if collab::remote_preview(ui,state,true){return;}
     let media = {
         let guard = state.borrow();
         guard
@@ -5894,6 +5903,7 @@ fn ensure_extension(path: PathBuf, ext: &str) -> PathBuf {
 }
 
 fn relink_media(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    if collab::guest(&state.borrow()){set_status(state,"Media is managed on the host. Ask the host to relink it.".into());return;}
     if !engine_setup::require(ui, state) { return; }
     if state.borrow().import_rx.is_some() {
         set_status(
@@ -6305,6 +6315,12 @@ fn handle_dropped_files(
 
 fn import_paths(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, paths: Vec<PathBuf>) {
     if paths.is_empty() { return; }
+    if collab::guest(&state.borrow()){
+        let mut current=state.borrow_mut();
+        if collab::readonly(&current){current.status="Only editors can upload media to the host.".into();return;}
+        if let Some(service)=&current.collaboration.service{for path in paths{if let Err(error)=service.upload(path){current.status=error;break;}}}
+        return;
+    }
     if !engine_setup::require(ui, state) {
         state.borrow_mut().engine_setup.deferred_paths = paths.into_iter().take(media_import::MAX_ROOTS).collect();
         return;

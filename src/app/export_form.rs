@@ -183,6 +183,7 @@ pub(super) fn browse(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, f
 }
 
 pub(super) fn submit(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, start: bool) {
+    if collab::request_export(state){ui.set_status_text(state.borrow().status.clone().into());return;}
     if guard(ui, state) { return; }
     changed(ui, state);
     let project = state.borrow().editor.project.clone();

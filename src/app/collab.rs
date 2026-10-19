@@ -7,17 +7,108 @@ struct Bridge{
     epoch:String,actor:String,member:Member,revision:u64,sequence:u64,document:Document,last:Document,
     pending:Vec<Patch>,local_branch:Project,connected:bool,host:bool,undo:Vec<OperationId>,redo:usize,history_pending:bool,
 }
+struct WaveView{key:(u64,u64,u64,u64,u16),id:u64,at:Instant,peaks:Vec<[f32;2]>}
+struct RemoteView{request:crate::collaboration::media::Request,last_frame:i64,at:Instant}
 #[derive(Default)]
 pub(super) struct State{
-    service:Option<Session>,bridge:Option<Bridge>,participants:Vec<Participant>,status:String,code:String,
+    remote_document:Option<String>,export_requested:bool,filmstrip_request:Option<(u64,playback::filmstrips::FilmstripRequest,Instant)>,waveforms:std::collections::BTreeMap<u64,WaveView>,thumbnail_request:Option<(u64,Instant)>,upload_active:bool,deferred:VecDeque<Event>,remote_media:bool,remote_views:std::collections::BTreeMap<bool,RemoteView>,remote_id:u64,remote_audio:Option<crate::collaboration::media::Audio>,sources:Vec<(u64,PathBuf)>,
+    pub(super) service:Option<Session>,bridge:Option<Bridge>,participants:Vec<Participant>,status:String,code:String,
     issues:Vec<String>,branches:Vec<Project>,start_gen:u64,observed_gen:u64,changed_at:Option<Instant>,leave_at:Option<Instant>,
+}
+pub(super) fn request_export(state:&Rc<std::cell::RefCell<AppState>>)->bool{
+    if !guest(&state.borrow()){return false;}
+    let mut current=state.borrow_mut();current.status=if readonly(&current){"Only connected editors can request a host export.".into()}else{match current.collaboration.service.as_ref().ok_or("Host disconnected".to_string()).and_then(|service|service.request_export()){Ok(())=>"Export requested. The host chooses the destination and renders the file.".into(),Err(error)=>error}};true
+}
+pub(super) fn guest(state:&AppState)->bool{
+    state.collaboration.bridge.as_ref().map(|bridge|!bridge.host&&bridge.document.get("document/document_id").and_then(|v|v.as_str())==Some(state.editor.project.document_id.as_str()))
+        .unwrap_or_else(||state.collaboration.remote_document.as_deref()==Some(state.editor.project.document_id.as_str()))
+}
+pub(super) fn remote_preview(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>,source:bool)->bool{
+    if !guest(&state.borrow()){return false;}
+    let mut current=state.borrow_mut();
+    if !current.collaboration.remote_media{return true;}
+    if source{
+        let selected=current.editor.selected_media.and_then(|id|current.editor.project.media(id)).cloned();
+        let Some(media)=selected else{ui.set_show_source_picture(false);return true;};
+        if current.source.media_id!=Some(media.id){current.source.select(Some(media.id),media.source_rate(),media.source_frames());current.source_usable=true;current.source_feedback.clear();sync_source_controls(ui,&current);}
+    }
+    let (revision,connected)=current.collaboration.bridge.as_ref().map(|b|(b.revision,b.connected)).unwrap_or_default();
+    if !connected{current.playing=false;current.source.stop();if let Some(audio)=&current.collaboration.remote_audio{audio.clear();}return true;}
+    let media_id=if source{current.editor.selected_media}else{None};
+    let frame=if source{current.source.frame}else{current.editor.project.sequence.playhead};
+    let playing=if source{current.source.playing}else{current.playing};let speed=if source{current.source.speed}else{current.speed};
+    let (seq_w,seq_h,rate)=if let Some(id)=media_id{let Some(media)=current.editor.project.media(id)else{return true;};(media.width,media.height,media.source_rate())}else{let seq=&current.editor.project.sequence;(seq.width,seq.height,seq.frame_rate)};
+    let (w,h)=preview_canvas(seq_w.max(2),seq_h.max(2),640,360);let(w,h)=(w.max(2).min(1280),h.max(2).min(720));
+    let seeking=if source{current.source.scrub_origin.is_some()}else{current.pointer.down&&current.pointer.seeking};
+    let changed=current.collaboration.remote_views.get(&source).is_none_or(|old|old.request.source!=media_id||old.request.revision!=revision||old.request.width!=w||old.request.height!=h||old.request.playing!=playing||old.request.speed!=speed||(!playing||seeking)&&old.request.frame!=frame||old.at.elapsed()>std::time::Duration::from_secs(3));
+    if changed{
+        current.collaboration.remote_id=current.collaboration.remote_id.wrapping_add(1);
+        let request=crate::collaboration::media::Request{view:if source{1}else{0},id:current.collaboration.remote_id,revision,source:media_id,frame:frame.max(0),width:w,height:h,audio_frames:if playing&&(speed-1.).abs()<0.01{(rate.fps()/15.).ceil().max(1.)as u32}else{0},playing,speed};
+        let result=current.collaboration.service.as_ref().ok_or("Host disconnected".to_string()).and_then(|service|service.preview(request.clone()));
+        if let Err(error)=result{current.collaboration.status=error;}else{
+            current.collaboration.remote_views.insert(source,RemoteView{request,last_frame:-1,at:Instant::now()});
+            if !playing{if let Some(audio)=&current.collaboration.remote_audio{audio.clear();}}
+            if source{current.source_request_pending=true;current.source_feedback.request(Instant::now());}else{current.program_request_pending=true;current.program_feedback.request(Instant::now());}
+        }
+    }
+    sync_viewer_status(ui,&current);true
+}
+pub(super) fn remote_filmstrips(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>)->bool{
+    if !guest(&state.borrow()){return false;}let mut current=state.borrow_mut();if !current.collaboration.remote_media{return true;}
+    if current.collaboration.filmstrip_request.as_ref().is_some_and(|(_,_,at)|at.elapsed()<std::time::Duration::from_secs(5)){return true;}
+    if let Some(picture)=filmstrips::remote_next(ui,&mut current){
+        current.collaboration.remote_id=current.collaboration.remote_id.wrapping_add(1);let id=current.collaboration.remote_id;let revision=current.collaboration.bridge.as_ref().map_or(0,|b|b.revision);
+        let request=crate::collaboration::media::Request{view:3,id,revision,source:Some(picture.media.id),frame:picture.ordinal,width:picture.width,height:picture.height,audio_frames:0,playing:false,speed:0.};
+        if let Some(service)=&current.collaboration.service{if service.preview(request).is_ok(){current.collaboration.filmstrip_request=Some((id,picture,Instant::now()));}}
+    }true
+}
+pub(super) fn remote_waveforms(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>)->bool{
+    if !guest(&state.borrow()){return false;}
+    let mut current=state.borrow_mut();if !current.collaboration.remote_media{return true;}
+    let revision=current.collaboration.bridge.as_ref().map_or(0,|b|b.revision);let seq=&current.editor.project.sequence;
+    let mut visible=Vec::new();
+    for row in rows_for(&current){if !waveform_row_visible(row.y,row.h,ui.get_timeline_scroll_y(),current.track_body){continue;}
+        let track=&seq.tracks[row.track_index];if track.kind!=TrackKind::Audio{continue;}
+        for clip in &track.clips{let x=(clip.timeline_start as f64-seq.scroll)as f32*seq.zoom as f32;let width=clip.duration as f32*seq.zoom as f32;
+            let left=x.max(0.);let right=(x+width).min(current.timeline_w);let width=right-left;if width<1.||!width.is_finite(){continue;}
+            let scale=1./(seq.zoom*seq.frame_rate.fps());let offset=(left-x)as f64*scale;let seconds=width as f64*scale;let count=(width.ceil()as u16).clamp(1,1024);
+            visible.push((clip.id,(clip.media_id,clip.source_start_seconds(seq.frame_rate).to_bits(),offset.to_bits(),seconds.to_bits(),count),offset,seconds));if visible.len()>=16{break;}
+        }if visible.len()>=16{break;}
+    }
+    current.collaboration.waveforms.retain(|id,_|visible.iter().any(|(clip,_,_,_)|clip==id));
+    for(clip,key,offset,seconds)in visible{
+        let needs=current.collaboration.waveforms.get(&clip).is_none_or(|view|view.key!=key||view.peaks.is_empty()&&view.at.elapsed()>std::time::Duration::from_secs(5));
+        if !needs{continue;}current.collaboration.remote_id=current.collaboration.remote_id.wrapping_add(1);let id=current.collaboration.remote_id;
+        let request=crate::collaboration::media::WaveRequest{id,revision,clip,offset,seconds,columns:key.4};
+        if let Some(service)=&current.collaboration.service{if service.waveform(request).is_ok(){current.collaboration.waveforms.insert(clip,WaveView{key,id,at:Instant::now(),peaks:Vec::new()});}}
+    }true
+}
+pub(super) fn waveform_picture(state:&AppState,clip:&Clip,x:f32,width:f32,height:f32)->(slint::Image,f32,f32){
+    let empty=||(slint::Image::default(),0.,0.);let Some(view)=state.collaboration.waveforms.get(&clip.id)else{return empty();};if view.peaks.is_empty(){return empty();}
+    let left=x.max(0.);let visible=(x+width).min(state.timeline_w)-left;if visible<1.||height<24.{return empty();}
+    let count=view.peaks.len();let rows=((height-24.).floor()as u32).clamp(4,64);let mut buffer=SharedPixelBuffer::<slint::Rgba8Pixel>::new(count as u32,rows);let pixels=buffer.make_mut_slice();
+    for(column,peak)in view.peaks.iter().enumerate(){let center=(rows-1)as f32/2.;let top=(center-peak[1]*center).floor().max(0.)as usize;let bottom=(center-peak[0]*center).ceil().min((rows-1)as f32)as usize;for row in top..=bottom{pixels[row*count+column]=slint::Rgba8Pixel{r:207,g:236,b:214,a:190};}}
+    (slint::Image::from_rgba8(buffer),left-x,visible)
+}
+pub(super) fn remote_thumbnails(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>)->bool{
+    if !guest(&state.borrow()){return false;}
+    let mut current=state.borrow_mut();if !current.collaboration.remote_media{return true;}
+    if current.collaboration.thumbnail_request.is_some_and(|(_,at)|at.elapsed()<std::time::Duration::from_secs(5)){return true;}
+    let candidate=current.editor.project.media.iter().filter(|m|m.has_video||m.kind==MediaKind::Still).filter(|m|current.current_bin.is_empty()||m.bin==current.current_bin).filter(|m|current.query.is_empty()||m.name.to_lowercase().contains(&current.query)).take(128).find(|m|!current.thumbnail_cache.iter().any(|(cached,_)|same_picture(cached,m))).cloned();
+    if let Some(media)=candidate{
+        current.collaboration.remote_id=current.collaboration.remote_id.wrapping_add(1);let id=current.collaboration.remote_id;
+        let revision=current.collaboration.bridge.as_ref().map_or(0,|b|b.revision);let(w,h)=preview_canvas(media.width.max(2),media.height.max(2),160,90);
+        let request=crate::collaboration::media::Request{view:2,id,revision,source:Some(media.id),frame:0,width:w.max(2),height:h.max(2),audio_frames:0,playing:false,speed:0.};
+        if let Some(service)=&current.collaboration.service{if service.preview(request).is_ok(){current.collaboration.thumbnail_request=Some((id,Instant::now()));}}
+    }
+    let _=ui;true
 }
 pub(super) fn active(state:&AppState)->bool{state.collaboration.service.is_some()}
 pub(super) fn readonly(state:&AppState)->bool{active(state)&&(state.collaboration.leave_at.is_some()||state.collaboration.bridge.as_ref().is_none_or(|b|!b.connected||!b.member.editor))}
 pub(super) fn can_undo(state:&AppState)->bool{state.collaboration.bridge.as_ref().is_some_and(|b|b.connected&&b.member.editor&&!b.history_pending&&(!b.undo.is_empty()||!b.pending.is_empty()||state.editor.can_undo()))}
 pub(super) fn can_redo(state:&AppState)->bool{state.collaboration.bridge.as_ref().is_some_and(|b|b.connected&&b.member.editor&&!b.history_pending&&b.redo>0)}
 pub(super) fn sync(ui:&AppWindow,state:&AppState){
-    let current=&state.collaboration;ui.set_session_connected(current.bridge.as_ref().is_some_and(|b|b.connected));ui.set_session_active(current.service.is_some());ui.set_session_readonly(readonly(state));
+    let current=&state.collaboration;ui.set_session_export_requested(current.export_requested);ui.set_session_upload_active(current.upload_active);ui.set_session_connected(current.bridge.as_ref().is_some_and(|b|b.connected));ui.set_session_active(current.service.is_some());ui.set_session_readonly(readonly(state));
     ui.set_session_auto_connect(if current.code.is_empty(){!state.preferences.relay.service_url.is_empty()||state.preferences.relay.uses_public()}else{current.code.starts_with("quaternio-join-v1:")});ui.set_session_simple_code(current.code.starts_with("quaternio-join-v1:"));
     ui.set_session_host(current.bridge.as_ref().is_some_and(|b|b.host));ui.set_session_status(current.status.clone().into());
     ui.set_session_code(current.code.clone().into());ui.set_session_issues(current.issues.iter().rev().take(16).map(|text|text.chars().take(2048).collect::<String>()).collect::<Vec<_>>().join("\n\n").into());ui.set_session_has_branch(!current.branches.is_empty());
@@ -33,6 +124,7 @@ fn record_issue(state:&mut AppState,reason:String){
 }
 fn flush(state:&mut AppState)->Result<bool,String>{
     let c=&mut state.collaboration;let Some(b)=c.bridge.as_mut()else{return Ok(false);};
+    if b.host{let paths:Vec<_>=state.editor.project.media.iter().map(|m|(m.id,m.path.clone())).collect();if paths!=c.sources{c.service.as_ref().ok_or("Session stopped")?.update_sources(state.editor.project.clone())?;c.sources=paths;}}
     let local=document::capture(&state.editor.project);if local==b.last{return Ok(false);}
     if state.editor.project.document_id!=b.document.get("document/document_id").and_then(|v|v.as_str()).unwrap_or(""){
         return Err("Project changed. The previous live session has ended.".into());
@@ -114,6 +206,9 @@ pub(super) fn handle(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>,comma
             let service=Session::join_with_relay(ui.get_session_input().as_str(),state.borrow().preferences.relay.clone())?;let generation=state.borrow().edit_gen;
             state.borrow_mut().collaboration=State{service:Some(service),status:"Connecting…".into(),start_gen:generation,observed_gen:generation,..Default::default()};
         },
+        "session-export"=>{state.borrow_mut().collaboration.export_requested=false;on_command(ui,state,"export-view");},
+        "session-upload"=>{if readonly(&state.borrow()){return Err("Only connected editors can upload media".into());}import_media(ui,state);},
+        "session-cancel-uploads"=>state.borrow().collaboration.service.as_ref().ok_or("No active session")?.cancel_upload(String::new())?,
         "session-invite"=>state.borrow().collaboration.service.as_ref().ok_or("Host a session first")?.invite(ui.get_session_invitee().to_string(),ui.get_session_editor_role())?,
         "session-accept"=>state.borrow().collaboration.service.as_ref().ok_or("Host a session first")?.signal(ui.get_session_input().to_string())?,
         "session-load-code"|"session-open-invitation"|"session-open-reply"=>{
@@ -159,43 +254,96 @@ pub(super) fn handle(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>,comma
 }
 fn finish_leave(state:&mut AppState){
     if state.collaboration.bridge.as_ref().is_some_and(|b|!b.pending.is_empty()||b.history_pending){record_issue(state,"The session ended with pending edits. A local branch has been retained.".into());}
-    let c=&mut state.collaboration;c.service=None;c.bridge=None;c.participants.clear();c.leave_at=None;c.status="Session ended. Your document and retained branches remain available locally.".into();
+    state.playing=false;state.source.stop();state.audio.stop();
+    let c=&mut state.collaboration;c.remote_audio=None;c.remote_media=false;c.remote_views.clear();c.filmstrip_request=None;c.thumbnail_request=None;c.waveforms.clear();c.deferred.clear();c.sources.clear();c.service=None;c.bridge=None;c.participants.clear();c.leave_at=None;c.status="Session ended. Your document and retained branches remain available locally.".into();
     state.editor.clear_shared_history();state.editor.project.ensure_integrity();
 }
 pub(super) fn pump(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
-    if !active(&state.borrow())||state.borrow().pointer.down||state.borrow().import_rx.is_some(){return;}
+    if !active(&state.borrow()){return;}
+    let busy=state.borrow().pointer.down||state.borrow().import_rx.is_some();
     let mut changed=false;
     {
         let mut s=state.borrow_mut();let generation=s.edit_gen;
         if s.collaboration.observed_gen!=generation{s.collaboration.observed_gen=generation;s.collaboration.changed_at=Some(Instant::now());}
-        if s.collaboration.changed_at.is_some_and(|at|at.elapsed()>std::time::Duration::from_millis(120)){
+        if !busy&&s.collaboration.changed_at.is_some_and(|at|at.elapsed()>std::time::Duration::from_millis(120)){
             match flush(&mut s){Ok(flushed)=>{changed|=flushed;s.collaboration.changed_at=None;},Err(error)=>{record_issue(&mut s,error);if let Some(b)=&mut s.collaboration.bridge{b.connected=false;}changed=true;}}
         }
     }
-    let events:Vec<_>={let s=state.borrow();let mut events=Vec::new();
+    let mut events:Vec<_>={let mut s=state.borrow_mut();let mut events=if busy{Vec::new()}else{s.collaboration.deferred.drain(..).collect()};
         for _ in 0..64{match s.collaboration.service.as_ref().unwrap().rx.try_recv(){Ok(event)=>events.push(event),Err(mpsc::TryRecvError::Disconnected)=>{events.push(Event::Ended("Session service stopped. Your local document and retained outbox remain available.".into()));break;},Err(_)=>break}}
         events
     };
-    if !events.is_empty(){
+    if busy{
+        let mut immediate=Vec::new();let mut s=state.borrow_mut();
+        for event in events{if matches!(&event,Event::Preview(_)|Event::Waveform(_)|Event::Status(_)|Event::MediaAvailable(_)|Event::UploadState(_)){immediate.push(event);}else if s.collaboration.deferred.len()<256{s.collaboration.deferred.push_back(event);}else{record_issue(&mut s,"Too many remote changes during this gesture. Release the pointer to catch up.".into());}}
+        events=immediate;
+    }
+    if !busy&&!events.is_empty(){
         // Flush a just-finished local gesture before applying remote commits.
         let mut s=state.borrow_mut();if let Err(error)=flush(&mut s){record_issue(&mut s,error);}drop(s);
     }
-    for event in events{changed=true;let mut s=state.borrow_mut();match event{
+    let mut uploaded=Vec::new();
+    for event in events{changed|=!matches!(&event,Event::Preview(_)|Event::Waveform(_));let mut s=state.borrow_mut();match event{
+        Event::ExportRequested(name)=>{s.collaboration.export_requested=true;s.collaboration.status=format!("{name} requested an export. Choose Export on the host to review settings and destination.");},
+        Event::MediaChanged=>{s.collaboration.remote_views.clear();s.collaboration.waveforms.clear();s.collaboration.filmstrip_request=None;s.collaboration.thumbnail_request=None;s.collaboration.filmstrip_request=None;s.thumbnail_cache.clear();s.filmstrips.reset();if let Some(audio)=&s.collaboration.remote_audio{audio.clear();}},
+        Event::Waveform(packet)=>{if let Some(view)=s.collaboration.waveforms.get_mut(&packet.request.clip){if view.id==packet.request.id{view.peaks=packet.peaks;ui.set_clips(model(clip_views(&s)));}}},
+        Event::UploadState(active)=>s.collaboration.upload_active=active,
+        Event::Reconnecting=>{if let Some(bridge)=&mut s.collaboration.bridge{bridge.connected=false;}s.playing=false;s.source.stop();s.audio.stop();if let Some(audio)=&s.collaboration.remote_audio{audio.clear();}s.collaboration.remote_views.clear();s.collaboration.status="Connection interrupted. Reconnecting to the host automatically…".into();},
+        Event::Resumed{document,revision,next_sequence}=>{
+            if let Some(bridge)=&mut s.collaboration.bridge{bridge.document=document;bridge.revision=revision;bridge.sequence=bridge.sequence.max(next_sequence);bridge.pending.retain(|patch|patch.id.sequence>=next_sequence);bridge.connected=true;bridge.history_pending=false;}
+            if let Err(error)=apply_projection(&mut s){record_issue(&mut s,error);}s.collaboration.remote_views.clear();s.collaboration.status="Reconnected. Your edits are synchronized.".into();
+        },
+        Event::Preview(packet)=>{
+            if packet.request.view==3{
+                if s.collaboration.filmstrip_request.as_ref().is_some_and(|(id,_,_)|*id==packet.request.id){let(_,request,_)=s.collaboration.filmstrip_request.take().unwrap();let image=packet.decode().ok().map(|(image,_)|image);filmstrips::remote_complete(&mut s,request,image);ui.set_clips(model(clip_views(&s)));}continue;
+            }
+            if packet.request.view==2{
+                if s.collaboration.thumbnail_request.is_some_and(|(id,_)|id==packet.request.id){
+                    s.collaboration.thumbnail_request=None;
+                    if let Some(media)=packet.request.source.and_then(|id|s.editor.project.media(id)).cloned(){
+                        let image=packet.decode().ok().map(|(image,_)|to_image(&image));s.thumbnail_cache.retain(|(cached,_)|cached.id!=media.id);s.thumbnail_cache.push_back((media,image));while s.thumbnail_cache.len()>128{s.thumbnail_cache.pop_front();}ui.set_bin_items(model(bin_views(&s)));
+                    }
+                }continue;
+            }
+            let source=packet.request.source.is_some();
+            let valid=s.collaboration.remote_views.get(&source).is_some_and(|view|view.request.id==packet.request.id&&view.request.revision==packet.request.revision&&view.request.source==packet.request.source)
+                &&s.collaboration.bridge.as_ref().is_some_and(|b|b.revision==packet.request.revision&&b.connected&&!b.host);
+            if !valid{continue;}
+            match packet.decode(){
+                Ok((image,samples))=>{
+                    if let Some(view)=s.collaboration.remote_views.get_mut(&source){view.last_frame=packet.request.frame;view.at=Instant::now();}
+                    if source{ui.set_source_image(to_image(&image));ui.set_show_source_picture(true);s.source_request_pending=false;s.source_feedback.picture(true,Instant::now());s.source.waiting_picture=false;s.source.waiting_audio=false;
+                        if s.source.playing{s.source.remote_picture(packet.request.frame);}
+                    }else{ui.set_viewer_image(to_image(&image));ui.set_show_picture(true);s.program_request_pending=false;s.program_feedback.picture(true,Instant::now());s.waiting_picture=false;s.waiting_audio=false;
+                        if s.playing{s.editor.project.sequence.playhead=packet.request.frame;s.anchor_frame=packet.request.frame;s.anchor_at=Instant::now();}
+                    }
+                    if !samples.is_empty()&&if source{s.source.playing}else{s.playing}{if let Some(audio)=&s.collaboration.remote_audio{audio.push(samples);}}
+                    push_clock(ui,&s);sync_source_controls(ui,&s);
+                },
+                Err(error)=>{if source{s.source_feedback.fail(error);}else{s.program_feedback.fail(error);}s.playing=false;s.source.stop();if let Some(audio)=&s.collaboration.remote_audio{audio.clear();}}
+            }
+        },
+        Event::Uploaded(path)=>uploaded.push(path),
+        Event::MediaAvailable(available)=>{s.collaboration.remote_media=available;if available&&s.collaboration.remote_audio.is_none(){s.collaboration.remote_audio=Some(crate::collaboration::media::Audio::new());}if !available{s.collaboration.status="This host needs an updated Quaternio build to stream media.".into();}},
         Event::Ready{epoch,actor,member,document,revision,next_sequence,host}=>{
             if s.collaboration.start_gen!=s.edit_gen&&s.collaboration.bridge.is_none(){s.collaboration.service=None;s.collaboration.status="The project changed while connecting. Your edits were retained; start the session again.".into();continue;}
+            s.collaboration.remote_views.clear();s.collaboration.waveforms.clear();s.collaboration.filmstrip_request=None;s.collaboration.thumbnail_request=None;
+            if !host{s.thumbnail_cache.clear();s.waveform_results.clear();s.filmstrips.reset();}
             let last=document.clone();let mut project=match document::materialize(&document){Ok(p)=>p,Err(error)=>{s.collaboration.status=error;continue;}};
             project.next_id=member.first;
             if !host&&project.document_id!=s.editor.project.document_id{s.editor.path=None;s.editor.selected_clips.clear();s.editor.selected_media=None;}
+            s.collaboration.remote_document=if host{None}else{Some(project.document_id.clone())};
             s.editor.apply_shared_project(project);
+            if !host{for media in &mut s.editor.project.media{media.path.clear();}}
             let local_branch=s.editor.project.clone();
             s.collaboration.bridge=Some(Bridge{epoch,actor,member,revision,sequence:next_sequence,document,last,pending:Vec::new(),local_branch,connected:true,host,undo:Vec::new(),redo:0,history_pending:false});
             s.collaboration.status=if host{"Session started. Invite someone to edit with you."}else{"Connected. Your edits are shared automatically."}.into();note_borrowed(&mut s);
         },
         Event::Code(code)=>{let simple=code.starts_with("quaternio-join-v1:");s.collaboration.code=code;s.collaboration.status=if simple{"Invite ready. Send the code privately; your guest can join immediately."}else if s.collaboration.bridge.as_ref().is_some_and(|b|b.host){"Invitation ready. Save it and send it privately."}else{"Your reply is ready. Send it back to the host."}.into();},
         Event::Participants(peers)=>s.collaboration.participants=peers,
-        Event::Status(message)=>s.collaboration.status=match message.as_str(){"ICE New"|"ICE Checking"|"Peer New"|"Peer Connecting"=>"Connecting…".into(),"ICE Connected"|"ICE Completed"|"Peer Connected"=>"Connection established. Finishing setup…".into(),"ICE Disconnected"|"Peer Disconnected"=>"Connection interrupted. Rejoin with a new invitation.".into(),_=>message},
+        Event::Status(message)=>s.collaboration.status=match message.as_str(){"ICE New"|"ICE Checking"|"Peer New"|"Peer Connecting"=>"Connecting…".into(),"ICE Connected"|"ICE Completed"|"Peer Connected"=>"Connection established. Finishing setup…".into(),"ICE Disconnected"|"Peer Disconnected"=>"Connection interrupted. Waiting to reconnect to the host…".into(),_=>message},
         Event::Conflict(reason)=>{if s.collaboration.issues.len()>=64{s.collaboration.issues.remove(0);}s.collaboration.issues.push(reason);},
-        Event::Ended(reason)=>{record_issue(&mut s,reason);if let Some(b)=&mut s.collaboration.bridge{b.connected=false;}s.collaboration.service=None;s.editor.clear_shared_history();s.editor.project.ensure_integrity();},
+        Event::Ended(reason)=>{s.playing=false;s.source.stop();s.audio.stop();if let Some(audio)=&s.collaboration.remote_audio{audio.clear();}record_issue(&mut s,reason);if let Some(b)=&mut s.collaboration.bridge{b.connected=false;}s.collaboration.service=None;s.editor.clear_shared_history();s.editor.project.ensure_integrity();},
         Event::Rejected{id,reason}=>{
             record_issue(&mut s,reason);if let Some(b)=&mut s.collaboration.bridge{b.pending.retain(|p|p.id!=id);b.history_pending=false;}
             if let Err(error)=apply_projection(&mut s){s.collaboration.status=error;}
@@ -222,5 +370,6 @@ pub(super) fn pump(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
             finish_leave(&mut s);changed=true;
         }
     }
+    if !uploaded.is_empty(){import_paths(ui,state,uploaded);}
     if changed{full_sync(ui,state);sync(ui,&state.borrow());}
 }

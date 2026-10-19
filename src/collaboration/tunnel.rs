@@ -14,6 +14,9 @@ fn request(agent:&ureq::Agent,url:&str,method:&str,token:&str,body:Option<Value>
     serde_json::from_slice(&bytes).map_err(|_|"Invalid HTTPS relay response".into())
 }
 
+#[path="tunnel_websocket.rs"]
+mod websocket;
+
 pub struct Tunnel {stop:Arc<AtomicBool>,threads:Vec<std::thread::JoinHandle<()>>,pub address:SocketAddr}
 impl Tunnel {
     pub fn start(url:&str,token:&str)->Result<Self,String>{
@@ -25,6 +28,7 @@ impl Tunnel {
         let id=value["id"].as_str().ok_or("HTTPS relay returned no connection ID")?;
         if id.len()!=32||!id.bytes().all(|b|b.is_ascii_hexdigit()){return Err("Invalid HTTPS relay connection ID".into());}
         let path=format!("{base}/{id}");
+        if std::env::var_os("QUATERNIO_HTTP_POLL_ONLY").is_none(){match websocket::start(&path,token){Ok(bridge)=>return Ok(bridge),Err(error) if std::env::var_os("QUATERNIO_WEBSOCKET_RELAY_ONLY").is_some()=>return Err(error),Err(_)=>{}}}
         let socket=Arc::new(UdpSocket::bind("127.0.0.1:0").map_err(|_|"Could not open local HTTPS relay bridge")?);
         socket.set_read_timeout(Some(Duration::from_millis(100))).map_err(|e|e.to_string())?;
         let address=socket.local_addr().map_err(|e|e.to_string())?;

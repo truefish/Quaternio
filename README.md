@@ -1,4 +1,6 @@
-![Quaternio](brand/quaternio.svg)
+<p align="center">
+  <img src="brand/quaternio.svg" alt="Quaternio" width="96" height="96"/>
+</p>
 
 # Quaternio
 
@@ -101,9 +103,11 @@ Older projects get an identity on load, so save once before distributing review 
 1. **Host:** **Collaborate → Start a session → Create invitation**, then copy the invite code.
 2. **Guest:** **Collaborate → Join with code**, then paste it.
 
-The public service at `https://connect.quaternio.app` is configured automatically and is **optional**. The public service is live. Direct P2P is preferred, with relay fallback when needed, including behind CGNAT. Connections show **Direct** or **Relayed**. Disable the public service or choose your own under **Connection options**. Direct/LAN connections also support invitation/reply files.
+The public service at `https://connect.quaternio.app` is configured automatically and is **optional**. Direct P2P is preferred, with relay fallback when needed, including behind CGNAT. Connections show **Direct** or **Relayed**. Disable the public service or choose your own under **Connection options**. Direct/LAN connections also support invitation/reply files.
 
-Edits and review notes synchronize through the host, with viewer permissions, per-author undo and retained conflicting edits. **Current limitation:** media previews still use local files. Host-rendered previews and uploads to host storage are planned so guests can edit without downloading footage. Automatic reconnect and host handoff are also pending.
+Edits and review notes synchronize through the host, with viewer permissions, per-author undo and retained conflicting edits. Media stays on the host: guests stream previews and audio, browse thumbnails and waveforms, and upload their own contributions to host storage. Guests can request an export from the host. Preview resolution adapts to connection speed; exports use the original media.
+
+Connections using the coordination service reconnect automatically after temporary interruptions, retaining pending edits and resuming uploads. When the host leaves, the session ends for everyone; there is no host transfer. Manual invitation/reply connections need a new exchange after a disconnection.
 
 ### Optional self-hosting
 
@@ -113,9 +117,9 @@ On a public Linux server with Python 3, Docker Compose, this checkout and DNS co
 sudo python3 scripts/deploy_relay.py --domain relay.example.com --directory /opt/quaternio-relay
 ```
 
-Open the printed firewall ports. If you already use a reverse proxy, route the hostname to the printed upstream; an nginx snippet is generated. Enter your server address and private host key in **Connection options**. Add `--public` to offer anonymous public sessions, or `--on-demand` to stop containers with Enter/Ctrl+C.
+Open the printed firewall ports. If you already use a reverse proxy, route the hostname to the printed upstream with WebSocket upgrades; an nginx snippet is generated. Enter your server address and private host key in **Connection options**. Add `--public` to offer anonymous public sessions, or `--on-demand` to stop containers with Enter/Ctrl+C.
 
-Established direct sessions survive service shutdown; relayed sessions need it throughout. ICE currently prepares fallback allocations during setup. Real ISP CGNAT and sustained load still need validation.
+Established direct sessions survive service shutdown; relayed sessions need it throughout. ICE currently prepares fallback allocations during setup. Automated network testing covers relay fallback; real ISP CGNAT conditions can vary.
 
 ## Exports
 

@@ -140,7 +140,7 @@ def main():
     (directory / ".dockerignore").write_text("*\n!service.py\n!Dockerfile\n")
     (directory / "Dockerfile").write_text("FROM python:3.14-alpine\nWORKDIR /app\nCOPY service.py /app/service.py\nUSER 65532:65532\nCMD [\"python\", \"-u\", \"/app/service.py\"]\n")
     (directory / "Caddyfile").write_text(f"{{\n admin off\n}}\n{domain} {{\n request_body {{\n  max_size 768KB\n }}\n reverse_proxy {args.http_bind}:{http_port}\n}}\n")
-    (directory / "nginx-location.conf").write_text(f"location / {{\n    proxy_pass http://{args.http_bind}:{http_port};\n    proxy_http_version 1.1;\n    proxy_set_header Host $host;\n    proxy_set_header Authorization $http_authorization;\n    proxy_set_header X-Forwarded-For $remote_addr;\n    proxy_buffering off;\n    proxy_cache off;\n    client_max_body_size 768k;\n    proxy_read_timeout 30s;\n}}\n")
+    (directory / "nginx-location.conf").write_text(f"location / {{\n    proxy_pass http://{args.http_bind}:{http_port};\n    proxy_http_version 1.1;\n    proxy_set_header Host $host;\n    proxy_set_header Authorization $http_authorization;\n    proxy_set_header Upgrade $http_upgrade;\n    proxy_set_header Connection \"upgrade\";\n    proxy_set_header X-Forwarded-For $remote_addr;\n    proxy_buffering off;\n    proxy_cache off;\n    client_max_body_size 768k;\n    proxy_read_timeout 30s;\n}}\n")
     turn = f"""listening-port={turn_port}
 listening-ip=0.0.0.0
 relay-ip={relay_ip}
@@ -177,7 +177,7 @@ denied-peer-ip=192.168.0.0-192.168.255.255
         with turn_path.open("a") as file:
             # Public relay pairs stay on this service, rather than forwarding
             # arbitrary UDP packets to third-party Internet destinations.
-            file.write(f"max-bps=262144\nbps-capacity=4194304\ndenied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff\ndenied-peer-ip=0.0.0.0-255.255.255.255\nallowed-peer-ip={public_ip}\n")
+            file.write(f"max-bps=1048576\nbps-capacity=16777216\ndenied-peer-ip=::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff\ndenied-peer-ip=0.0.0.0-255.255.255.255\nallowed-peer-ip={public_ip}\n")
     common = {"network_mode": "host", "restart": "no" if args.on_demand else "unless-stopped", "security_opt": ["no-new-privileges:true"]}
     compose = {"services": {
         "signaling": {**common, "build": {"context": "."}, "read_only": True, "cap_drop": ["ALL"], "pids_limit": 192, "mem_limit": "256m", "environment": {"QUATERNIO_RELAY_KEY": credentials["key"], "QUATERNIO_TURN_SECRET": credentials["turn"], "QUATERNIO_TURN_URLS": f"turn:{public_ip}:{turn_port}?transport=udp", "QUATERNIO_SIGNAL_BIND":args.http_bind, "QUATERNIO_SIGNAL_PORT":str(http_port), "QUATERNIO_TURN_LOCAL_PORT":str(turn_port)}},

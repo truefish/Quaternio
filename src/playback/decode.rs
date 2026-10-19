@@ -305,9 +305,15 @@ pub fn probe_path(path: &Path) -> Result<Media, String> {
 pub fn probe_path_cancellable(path: &Path, cancel: &AtomicBool) -> Result<Media, String> {
     let before = origin_stamp(path);
     let tool = find_ffprobe()?;
-    let output = command_output_with_deadline(
-        &tool,
-        &[
+    let uploaded = path.canonicalize().ok().zip(crate::preferences::data_dir().join("session-media").canonicalize().ok())
+        .is_some_and(|(file, root)| file.starts_with(root));
+    let mut arguments: Vec<String> = Vec::new();
+    if uploaded {
+        // Uploaded media must be self-contained: never follow playlists or network URLs.
+        arguments.extend(["-protocol_whitelist", "file,pipe", "-format_whitelist",
+            "mov,matroska,webm,avi,flv,mpeg,mpegts,ogg,mp3,aac,wav,flac,aiff,jpeg_pipe,png_pipe,bmp_pipe,webp_pipe,tiff_pipe,gif,asf,mxf,rm,ape,wv,ac3,eac3,dts,au,amr"].map(str::to_owned));
+    }
+    arguments.extend([
             "-v".into(),
             "error".into(),
             "-print_format".into(),
@@ -315,7 +321,10 @@ pub fn probe_path_cancellable(path: &Path, cancel: &AtomicBool) -> Result<Media,
             "-show_entries".into(),
             "format=duration,start_time:stream=index,codec_type,width,height,r_frame_rate,avg_frame_rate,nb_frames,duration,start_time:stream_disposition=attached_pic".into(),
             path.display().to_string(),
-        ],
+        ]);
+    let output = command_output_with_deadline(
+        &tool,
+        &arguments,
         cancel,
         None,
         Some(Duration::from_secs(30)),
@@ -1623,7 +1632,7 @@ fn decode_audio_inner(path: &Path, cancel: Option<&AtomicBool>) -> Result<Pcm, S
 /// second of preroll keeps codec/resampler startup outside the audible window.
 /// AAC perceptual-noise synthesis may differ from an origin decode after a
 /// seek; sample phase/count remain aligned. Export still uses origin decoding.
-pub(super) fn decode_audio_window(
+pub(crate) fn decode_audio_window(
     path: &Path,
     block: i64,
     cancel: &AtomicBool,

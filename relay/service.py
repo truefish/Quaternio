@@ -25,6 +25,8 @@ LIMIT = 768 * 1024
 TUNNELS = {}
 TUNNEL_LOCK = threading.Lock()
 PUBLIC = os.environ.get("QUATERNIO_PUBLIC", "0") == "1"
+HTTPS_BUDGET = min(256, max(1, int(os.environ.get("QUATERNIO_HTTPS_GIB", "64")))) * 1024 * 1024 * 1024
+ROOM_BUDGET = 16 * 1024 * 1024
 PUBLIC_SESSIONS = {}
 RATES = {}
 RATE_LOCK = threading.Lock()
@@ -60,7 +62,7 @@ def charge(token, amount):
             if deadline <= now:
                 del TRAFFIC[key]
         used, _ = TRAFFIC.get(token, (0, expiry))
-        if used + amount > 1024 * 1024 * 1024 or len(TRAFFIC) >= 512 and token not in TRAFFIC:
+        if used + amount > HTTPS_BUDGET or len(TRAFFIC) >= 512 and token not in TRAFFIC:
             return False
         TRAFFIC[token] = (used + amount, expiry)
         return True
@@ -227,6 +229,89 @@ class Handler(BaseHTTPRequestHandler):
                 result = (201, {**relay, "access_token": token})
         return self.reply(*result)
 
+    def websocket(self, key, tunnel, token):
+        if self.command != "GET" or self.headers.get("Upgrade", "").lower() != "websocket" or "upgrade" not in self.headers.get("Connection", "").lower() or self.headers.get("Sec-WebSocket-Version") != "13":
+            return self.reply(400, {"error": "WebSocket upgrade required"})
+        try:
+            nonce = self.headers.get("Sec-WebSocket-Key", "")
+            if len(base64.b64decode(nonce, validate=True)) != 16:
+                raise ValueError("Invalid WebSocket key")
+        except (ValueError, TypeError):
+            return self.reply(400, {"error": "Invalid WebSocket key"})
+        if not tunnel.reader.acquire(blocking=False):
+            return self.reply(409, {"error": "A relay reader is already active"})
+        writing = threading.Lock()
+        def frame(opcode, payload):
+            size = len(payload)
+            header = bytes([0x80 | opcode, size]) if size < 126 else bytes([0x80 | opcode, 126]) + size.to_bytes(2, "big")
+            with writing:
+                self.wfile.write(header + payload)
+        def exact(size):
+            data = self.rfile.read(size)
+            if len(data) != size:
+                raise EOFError()
+            return data
+        def send():
+            try:
+                while not tunnel.closed.is_set():
+                    try:
+                        packet = base64.b64decode(tunnel.packets.get(timeout=.2))
+                    except queue.Empty:
+                        continue
+                    if not valid_tunnel_token(token) or not charge(token, len(packet)):
+                        break
+                    frame(2, packet)
+            except OSError:
+                pass
+            finally:
+                tunnel.close()
+        writer = None
+        try:
+            self.connection.settimeout(90)
+            self.send_response(101)
+            self.send_header("Upgrade", "websocket")
+            self.send_header("Connection", "Upgrade")
+            accept = hashlib.sha1((nonce + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode(), usedforsecurity=False).digest()
+            self.send_header("Sec-WebSocket-Accept", base64.b64encode(accept).decode())
+            self.end_headers()
+            writer = threading.Thread(target=send, daemon=True)
+            writer.start()
+            while not tunnel.closed.is_set():
+                first, second = exact(2)
+                opcode, size = first & 15, second & 127
+                if first & 0x70 or not first & 0x80 or not second & 0x80 or opcode not in (2, 8, 9, 10):
+                    frame(8, (1002).to_bytes(2, "big")); break
+                if size == 126:
+                    size = int.from_bytes(exact(2), "big")
+                elif size == 127:
+                    size = int.from_bytes(exact(8), "big")
+                if size > 32768 or opcode >= 8 and size > 125 or not allowed(("ws-frames", key), 2000, 1):
+                    frame(8, (1009).to_bytes(2, "big")); break
+                mask = exact(4)
+                packet = bytes(byte ^ mask[index % 4] for index, byte in enumerate(exact(size)))
+                tunnel.used = time.monotonic()
+                if opcode == 8:
+                    frame(8, packet); break
+                if not valid_tunnel_token(token) or not charge(token, len(packet)):
+                    frame(8, (1008).to_bytes(2, "big")); break
+                if opcode == 9:
+                    frame(10, packet)
+                elif opcode == 2:
+                    if len(packet) < 4:
+                        frame(8, (1002).to_bytes(2, "big")); break
+                    tunnel.socket.send(packet)
+        except (OSError, EOFError, ValueError):
+            pass
+        finally:
+            self.close_connection = True
+            tunnel.close()
+            tunnel.reader.release()
+            if writer:
+                writer.join(timeout=.3)
+            with TUNNEL_LOCK:
+                if TUNNELS.get(key) is tunnel:
+                    del TUNNELS[key]
+
     def tunnel_request(self):
         token = self.headers.get("Authorization", "").removeprefix("Bearer ")
         if len(token) > 512 or not valid_tunnel_token(token):
@@ -246,7 +331,7 @@ class Handler(BaseHTTPRequestHandler):
                     result = (201, {"id": key})
                 tunnel = None
             else:
-                match = re.fullmatch(r"/v1/tunnels/([a-f0-9]{32})", self.path)
+                match = re.fullmatch(r"/v1/tunnels/([a-f0-9]{32})(/ws)?", self.path)
                 tunnel = TUNNELS.get(match[1]) if match else None
                 result = (404, {"error": "Relay connection expired"})
         if tunnel is None:
@@ -254,6 +339,8 @@ class Handler(BaseHTTPRequestHandler):
         if not secrets.compare_digest(tunnel.token, token):
             return self.reply(401, {"error": "Unauthorized"})
         tunnel.used = time.monotonic()
+        if self.path.endswith("/ws"):
+            return self.websocket(match[1], tunnel, token)
         if self.command == "DELETE":
             tunnel.close()
             return self.reply(200, {"ok": True})
@@ -327,49 +414,84 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(offer, str) or not offer.startswith("quaternio-peer-v1:") or len(offer) > 512 * 1024:
                     raise ValueError("Invalid invitation")
                 with LOCK:
-                    if len(ROOMS) >= 128 or identity != "owner" and sum(r["owner"] == identity for r in ROOMS.values()) >= 7:
+                    if sum(len(r["offer"]) + len(r["answer"] or "") for r in ROOMS.values()) + len(offer) > ROOM_BUDGET or len(ROOMS) >= 128 or identity != "owner" and sum(r["owner"] == identity for r in ROOMS.values()) >= 7:
                         result = (429, {"error": "Too many pending invitations"})
                     else:
                         room_id = secrets.token_hex(16)
-                        room = {"host": secrets.token_urlsafe(32), "guest": secrets.token_urlsafe(32), "offer": offer, "answer": None, "expires": now + 600, "owner": identity, "relay": credentials(14400 if identity != "owner" else 86400)}
+                        room = {"host": secrets.token_urlsafe(32), "guest": secrets.token_urlsafe(32), "resume": secrets.token_urlsafe(32), "activated": False, "offer": offer, "answer": None, "generation": 0, "reconnect": False, "expires": now + 600, "owner": identity, "relay": credentials(14400 if identity != "owner" else 86400)}
                         ROOMS[room_id] = room
-                        result = (201, {"id": room_id, "host": room["host"], "guest": room["guest"]})
+                        result = (201, {"id": room_id, "host": room["host"], "guest": room["guest"], "resume": room["resume"]})
                 return self.reply(*result)
-            match = re.fullmatch(r"/v1/rooms/([a-f0-9]{32})(/answer)?", self.path)
+            match = re.fullmatch(r"/v1/rooms/([a-f0-9]{32})(/answer|/offer|/reconnect|/activate)?", self.path)
             if not match:
                 return self.reply(404, {"error": "Not found"})
-            answer = None
-            if self.command == "POST" and match[2]:
-                with LOCK:
-                    room = ROOMS.get(match[1])
-                    authorized = room is not None and self.token(room["guest"])
-                if not authorized:
-                    return self.reply(401, {"error": "Unauthorized"})
-                answer = self.body().get("answer")
+            body = self.body() if self.command == "POST" else {}
+            answer = body.get("answer")
+            offer = body.get("offer")
+            if self.command == "POST" and match[2] == "/answer":
                 if not isinstance(answer, str) or not answer.startswith("quaternio-peer-v1:") or len(answer) > 512 * 1024:
                     raise ValueError("Invalid reply")
+            if self.command == "POST" and match[2] == "/offer":
+                if not isinstance(offer, str) or not offer.startswith("quaternio-peer-v1:") or len(offer) > 512 * 1024:
+                    raise ValueError("Invalid offer")
             with LOCK:
                 room = ROOMS.get(match[1])
                 if room is None:
-                    response = (404, {"error": "Invitation expired"})
+                    response = (404, {"error": "Session ended or invitation expired"})
                 else:
-                    answer_path = bool(match[2])
+                    suffix = match[2]
                     host = self.token(room["host"])
-                    guest = self.token(room["guest"])
+                    guest = self.token(room["guest"]) and not room["activated"]
+                    resumed = self.token(room["resume"])
+                    generation = room["generation"]
                     response = (401, {"error": "Unauthorized"})
-                    if self.command == "DELETE" and host and not answer_path:
+                    if self.command == "DELETE" and host and not suffix:
                         del ROOMS[match[1]]
                         response = (200, {"ok": True})
-                    elif self.command == "GET" and answer_path and host:
-                        response = (200, {"answer": room["answer"]})
-                    elif self.command == "GET" and not answer_path and guest:
-                        response = (200, {"offer": room["offer"], "relay": room["relay"]})
-                    elif self.command == "POST" and answer_path and guest:
-                        if room["answer"] is not None and room["answer"] != answer:
+                    elif self.command == "GET" and suffix == "/answer" and host:
+                        if room["answer"] is not None or generation > 0:
+                            room["expires"] = now + 90
+                        if int(room["relay"]["username"].split(":", 1)[0]) < time.time() + 600:
+                            room["relay"] = credentials(14400 if room["owner"] != "owner" else 86400)
+                        response = (200, {"answer": room["answer"], "generation": generation, "reconnect": room["reconnect"], "relay": room["relay"]})
+                    elif self.command == "GET" and not suffix and (guest or resumed):
+                        response = (200, {"offer": room["offer"], "relay": room["relay"], "generation": generation})
+                    elif self.command == "POST" and suffix == "/answer" and (guest and generation == 0 or resumed):
+                        if body.get("generation", 0) != generation:
+                            response = (409, {"error": "Stale connection reply"})
+                        elif room["answer"] is not None and room["answer"] != answer:
                             response = (409, {"error": "Invitation already used"})
+                        elif sum(len(r["offer"]) + len(r["answer"] or "") for r in ROOMS.values()) + len(answer) - len(room["answer"] or "") > ROOM_BUDGET:
+                            response = (429, {"error": "Coordination storage limit reached"})
                         else:
                             room["answer"] = answer
+                            room["expires"] = now + 90
                             response = (200, {"ok": True})
+                    elif self.command == "POST" and suffix == "/reconnect" and resumed:
+                        if body.get("generation") == generation and room["answer"] is not None and not room["reconnect"]:
+                            if allowed(("resume", match[1]), 4, 60):
+                                room["reconnect"] = True
+                                response = (200, {"ok": True, "generation": generation})
+                            else:
+                                response = (429, {"error": "Reconnect attempts are limited; retry shortly"})
+                        else:
+                            response = (200, {"ok": True, "generation": generation})
+                    elif self.command == "POST" and suffix == "/activate" and host:
+                        room["activated"] = True
+                        response = (200, {"ok": True})
+                    elif self.command == "POST" and suffix == "/offer" and host:
+                        if not room["reconnect"]:
+                            response = (409, {"error": "The guest has not requested reconnection"})
+                        elif sum(len(r["offer"]) + len(r["answer"] or "") for r in ROOMS.values()) - len(room["offer"]) - len(room["answer"] or "") + len(offer) > ROOM_BUDGET:
+                            response = (429, {"error": "Coordination storage limit reached"})
+                        else:
+                            room["offer"] = offer
+                            room["generation"] += 1
+                            room["answer"] = None
+                            room["reconnect"] = False
+                            room["expires"] = now + 90
+                            room["relay"] = credentials(14400 if room["owner"] != "owner" else 86400)
+                            response = (200, {"ok": True, "generation": room["generation"], "relay": room["relay"]})
             return self.reply(*response)
         except (ValueError, TypeError, json.JSONDecodeError):
             self.reply(400, {"error": "Invalid request"})

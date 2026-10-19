@@ -1638,6 +1638,8 @@ export component AppWindow inherits Window {
         || root.show-sequence-match || root.capturing-binding || root.show-export-details || root.show-engine-setup;
     in property <bool> session-auto-connect: false;
     in property <bool> session-simple-code: false;
+    in-out property <bool> session-export-requested: false;
+    in-out property <bool> session-upload-active: false;
     in-out property <bool> session-use-public: true;
     in-out property <string> session-service-url;
     in-out property <string> session-service-key;
@@ -2965,7 +2967,10 @@ for lane in root.lanes: Rectangle { y: (lane.y - root.timeline-scroll-y) * 1px; 
                                 if peer.revocable: TextBtn { label: "Remove"; clicked => { root.command("session-revoke:" + peer.id); } }
                             }
                         }
-                        Text { text: "This beta shares project edits. Host-streamed media previews are not available yet."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                        Text { text: "Media stays on the host. Guests stream previews and can upload media using Import. The session ends when the host leaves."; color: Palette.text-secondary; font-size: 12px; wrap: word-wrap; }
+                        if root.session-active && !root.session-host && !root.session-readonly: SecBtn { label: "Upload media to host…"; clicked => { root.command("session-upload"); } }
+                        if root.session-export-requested && root.session-host: SecBtn { label: "Review export request…"; clicked => { root.command("session-export"); } }
+                        if root.session-upload-active: TextBtn { label: "Cancel uploads"; clicked => { root.command("session-cancel-uploads"); } }
                         if root.session-readonly: Text { text: "Editing is paused while connecting or disconnected. Viewers cannot edit."; color: Palette.status-warning; font-size: 12px; wrap: word-wrap; }
                         if root.session-issues != "": Text { text: "Edits that need attention"; color: Palette.text-primary; font-size: 13px; font-weight: 600; }
                         if root.session-issues != "": Text { text: root.session-issues; color: Palette.status-warning; font-size: 12px; wrap: word-wrap; }

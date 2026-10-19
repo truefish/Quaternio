@@ -23,6 +23,11 @@ impl Outbox{
         result.persist(&result.data)?;Ok(result)
     }
     fn persist(&self,data:&Data)->Result<(),String>{let bytes=serde_json::to_vec(data).map_err(|e|e.to_string())?;if bytes.len()>MAX_BYTES*4{return Err("Client outbox reached its size limit; save a local branch".into());}crate::project::write_atomic(&self.path,&bytes)}
+    pub fn resnapshot(&mut self,document:Document,revision:u64,next_sequence:u64)->Result<Vec<Patch>,String>{
+        document::materialize(&document)?;let mut next=self.data.clone();next.document=document;next.revision=revision;
+        next.pending.retain(|patch|patch.id.sequence>=next_sequence);if next.pending.is_empty()&&next.rejected.is_empty(){next.branch=next.document.clone();}
+        self.persist(&next)?;self.data=next;Ok(self.data.pending.clone())
+    }
     pub fn enqueue(&mut self,patch:Patch,branch:Document)->Result<(),String>{
         if self.data.pending.len()>=16{return Err("Client outbox is full; local branch retained".into());}
         document::materialize(&branch)?;

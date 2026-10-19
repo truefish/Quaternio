@@ -44,6 +44,13 @@ impl Default for SourceTransport {
 }
 
 impl SourceTransport {
+    pub fn remote_picture(&mut self, frame: i64) {
+        self.frame = frame.clamp(0, self.total_frames.max(1) - 1);
+        self.anchor_frame = self.frame;
+        self.anchor_at = Instant::now();
+        self.waiting_picture = false;
+        self.waiting_audio = false;
+    }
     pub fn session_snapshot(&self) -> SourceSession {
         let mut cursors = self.cursors.clone();
         if let Some(id) = self.media_id {
