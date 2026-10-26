@@ -10,9 +10,13 @@ pub enum Packet{Begin{id:String,name:String,size:u64},Chunk{id:String,offset:u64
 impl Packet{pub fn id(&self)->&str{match self{Self::Begin{id,..}|Self::Chunk{id,..}|Self::End{id,..}|Self::Ack{id,..}|Self::Cancel{id,..}=>id}}}
 struct Incoming{peer:String,path:PathBuf,destination:PathBuf,file:std::fs::File,size:u64,offset:u64,hash:Sha256,used:Instant,progress:u64}
 impl Drop for Incoming{fn drop(&mut self){let _=std::fs::remove_file(&self.path);if let Some(parent)=self.destination.parent(){let _=std::fs::remove_dir(parent);}}}
-struct Outgoing{path:PathBuf,file:std::fs::File,modified:Option<std::time::SystemTime>,size:u64,offset:u64,acked:u64,hash:Sha256,started:bool,begin_sent:bool,ending:bool,used:Instant,name:String,progress:u64,checkpoints:std::collections::VecDeque<(u64,Sha256)>}
+struct Outgoing{file:std::fs::File,modified:Option<std::time::SystemTime>,size:u64,offset:u64,acked:u64,hash:Sha256,started:bool,begin_sent:bool,ending:bool,used:Instant,name:String,progress:u64,checkpoints:std::collections::VecDeque<(u64,Sha256)>}
 struct Completed{peer:String,size:u64}
 pub struct Transfers{root:PathBuf,incoming:BTreeMap<String,Incoming>,completed:BTreeMap<String,Completed>,outgoing:BTreeMap<String,Outgoing>,total:u64,errors:Vec<String>}
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub enum Stage{Queued,Uploading,Receiving,Finishing}
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct Progress{pub id:String,pub name:String,pub done:u64,pub total:u64,pub stage:Stage,pub cancellable:bool}
 pub enum Update{None,Progress(String),Received(PathBuf),Complete(String)}
 impl Transfers{
     pub fn new(epoch:&str)->Self{Self{root:crate::preferences::data_dir().join("session-media").join(epoch),incoming:BTreeMap::new(),completed:BTreeMap::new(),outgoing:BTreeMap::new(),total:0,errors:Vec::new()}}
@@ -21,7 +25,7 @@ impl Transfers{
         let file=std::fs::File::open(&path).map_err(|_|"Could not open file for upload")?;let meta=file.metadata().map_err(|_|"Could not inspect upload")?;
         if !meta.is_file()||meta.len()==0||meta.len()>MAX_FILE{return Err("Upload must be a regular file between 1 byte and 64 GiB".into());}
         let id=uuid::Uuid::new_v4().simple().to_string();let name=path.file_name().unwrap_or_default().to_string_lossy().chars().take(180).collect();
-        self.outgoing.insert(id.clone(),Outgoing{path,file,modified:meta.modified().ok(),size:meta.len(),offset:0,acked:0,hash:Sha256::new(),started:false,begin_sent:false,ending:false,used:Instant::now(),name,progress:u64::MAX,checkpoints:Default::default()});Ok(id)
+        self.outgoing.insert(id.clone(),Outgoing{file,modified:meta.modified().ok(),size:meta.len(),offset:0,acked:0,hash:Sha256::new(),started:false,begin_sent:false,ending:false,used:Instant::now(),name,progress:u64::MAX,checkpoints:Default::default()});Ok(id)
     }
     pub fn receive(&mut self,peer:&str,packet:Packet,can_upload:bool)->Result<(Vec<Packet>,Update),String>{
         let id=packet.id().to_string();if id.len()!=32||!id.bytes().all(|b|b.is_ascii_hexdigit()){return Err("Invalid upload ID".into());}
@@ -103,6 +107,10 @@ impl Transfers{
     pub fn take_errors(&mut self)->Vec<String>{std::mem::take(&mut self.errors)}
     pub fn restart_uploads(&mut self){for entry in self.outgoing.values_mut(){entry.started=false;entry.begin_sent=false;entry.ending=false;entry.used=Instant::now();}}
     pub fn outgoing_ids(&self)->Vec<String>{self.outgoing.keys().cloned().collect()}
+    pub fn progress(&self)->Vec<Progress>{
+        self.outgoing.iter().map(|(id,v)|Progress{id:id.clone(),name:v.name.clone(),done:v.acked,total:v.size,stage:if v.ending{Stage::Finishing}else if v.started{Stage::Uploading}else{Stage::Queued},cancellable:true})
+            .chain(self.incoming.iter().map(|(id,v)|Progress{id:id.clone(),name:v.destination.file_name().unwrap_or_default().to_string_lossy().into_owned(),done:v.offset,total:v.size,stage:Stage::Receiving,cancellable:false})).collect()
+    }
     pub fn active(&self)->bool{!self.outgoing.is_empty()}
     pub fn cancel(&mut self,id:&str){if let Some(entry)=self.incoming.remove(id){self.total=self.total.saturating_sub(entry.size);}self.outgoing.remove(id);}
     pub fn cancel_peer_file(&mut self,peer:&str,id:&str){if self.incoming.get(id).is_some_and(|entry|entry.peer==peer){self.cancel(id);}}

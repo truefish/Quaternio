@@ -11,15 +11,16 @@ use super::document::{Document,Member,Applied,Patch,Authority,MAX_BYTES};
 pub enum Record {
     Start{version:u32,epoch:String,document:Document},
     Member{actor:String,member:Member},
+    Upgrade{document:Document},
     Commit(Applied),Rejected{actor:String,patch:Patch,reason:String},
 }
-pub struct Audit {file:File,pub path:PathBuf,poisoned:bool}
+pub struct Audit {file:File,poisoned:bool}
 impl Audit {
     pub fn create(path:PathBuf,authority:&Authority)->Result<Self,String>{
         if let Some(parent)=path.parent(){std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;}
         let file=OpenOptions::new().create_new(true).read(true).write(true).open(&path).map_err(|e|e.to_string())?;
         fs2::FileExt::try_lock_exclusive(&file).map_err(|e|e.to_string())?;
-        let mut audit=Self{file,path,poisoned:false};
+        let mut audit=Self{file,poisoned:false};
         audit.append(&Record::Start{version:1,epoch:authority.epoch.clone(),document:authority.document.clone()})?;Ok(audit)
     }
     pub fn append(&mut self,record:&Record)->Result<(),String>{
@@ -49,7 +50,7 @@ impl Audit {
             records.push(serde_json::from_slice::<Record>(&bytes).map_err(|e|e.to_string())?);valid=file.stream_position().map_err(|e|e.to_string())?;
         }
         let mut records=records.into_iter();let Some(Record::Start{version:1,epoch,document})=records.next()else{return Err("Missing session log header".into());};
-        let project=super::document::materialize(&document)?;let mut authority=Authority::new(&project,epoch)?;let mut rejected=Vec::new();
+        let project=super::document::materialize(&document)?;let mut authority=Authority::new(&project,epoch)?;authority.document=document;let mut rejected=Vec::new();
         for record in records {match record {
             Record::Member{actor,member}=>{if authority.members.len()>=64&&!authority.members.contains_key(&actor){return Err("Session participant limit exceeded".into());}authority.members.insert(actor,member);},
             Record::Commit(expected)=>{
@@ -57,10 +58,16 @@ impl Audit {
                 let actual=if expected.undoes.is_some(){authority.undo(&actor,expected.patch.id.clone())?}else if expected.redid.is_some(){authority.redo(&actor,expected.patch.id.clone())?}else{authority.submit(&actor,expected.submitted.clone())?};
                 if expected!=actual{return Err("Session replay diverged; original log retained".into());}
             },
+            Record::Upgrade{document}=>{let expected=super::document::capture(&super::document::materialize(&authority.document)?);if document!=expected{return Err("Invalid session schema upgrade; original log retained".into());}authority.document=document;},
             Record::Rejected{patch,reason,..}=>{rejected.push((patch,reason));},
             _=>return Err("Unexpected session log header".into()),
         }}
         file.set_len(valid).and_then(|()|file.sync_data()).map_err(|e|e.to_string())?;file.seek(SeekFrom::End(0)).map_err(|e|e.to_string())?;
-        Ok((Self{file,path:path.to_owned(),poisoned:false},authority,rejected))
+        let mut audit=Self{file,poisoned:false};
+        if authority.document.get("document/version").and_then(|v|v.as_u64()).is_some_and(|v|v<crate::project::PROJECT_VERSION as u64){
+            let document=super::document::capture(&super::document::materialize(&authority.document)?);
+            audit.append(&Record::Upgrade{document:document.clone()})?;authority.document=document;
+        }
+        Ok((audit,authority,rejected))
     }
 }

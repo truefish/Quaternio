@@ -108,9 +108,6 @@ impl SourceTransport {
         self.frame = frame.clamp(0, self.total_frames - 1);
     }
 
-    pub fn step(&mut self, delta: i64) {
-        self.seek(self.frame.saturating_add(delta));
-    }
 
     pub fn stop(&mut self) {
         self.playing = false;

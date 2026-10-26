@@ -76,7 +76,7 @@ impl Payload{
 impl Drop for Payload{fn drop(&mut self){self.budget.fetch_sub(self.bytes.len(),Ordering::AcqRel);}}
 pub enum Event {
     Description{peer:String,description:RTCSessionDescription,offer:bool},
-    Opened(String),Message(String,Payload),AuxOpened(String,u8),AuxMessage(String,u8,Payload),Closed(String),Error(String,String),State(String,String),Route(String,bool),
+    Opened(String),Message(String,Payload),AuxOpened(String,u8),AuxMessage(String,u8,Payload),Closed(String),Error(String,String),State(String),Route(String,bool),
 }
 enum Command {
     Offer(String),Answer(String,RTCSessionDescription),Accept(String,RTCSessionDescription),Send(String,u8,Payload),Configure(RelaySettings),Close(String),Stop,
@@ -118,10 +118,10 @@ struct Handler {live:Arc<AtomicBool>,peer:String,events:mpsc::SyncSender<Event>,
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for Handler {
     async fn on_ice_gathering_state_change(&self,state:RTCIceGatheringState){if state==RTCIceGatheringState::Complete{self.gathered.store(true,Ordering::Release);}}
-    async fn on_ice_connection_state_change(&self,state:RTCIceConnectionState){if !self.live.load(Ordering::Acquire){return;}let _=self.events.try_send(Event::State(self.peer.clone(),format!("ICE {state:?}")));}
+    async fn on_ice_connection_state_change(&self,state:RTCIceConnectionState){if !self.live.load(Ordering::Acquire){return;}let _=self.events.try_send(Event::State(format!("ICE {state:?}")));}
     async fn on_connection_state_change(&self,state:RTCPeerConnectionState){
         if !self.live.load(Ordering::Acquire){return;}
-        let _=self.events.try_send(Event::State(self.peer.clone(),format!("Peer {state:?}")));
+        let _=self.events.try_send(Event::State(format!("Peer {state:?}")));
         if matches!(state,RTCPeerConnectionState::Failed|RTCPeerConnectionState::Closed){let _=self.events.try_send(Event::Closed(self.peer.clone()));}
     }
     async fn on_data_channel(&self,dc:Arc<dyn DataChannel>){
@@ -289,7 +289,7 @@ async fn run(mut commands:channel::Receiver<Command>,events:mpsc::SyncSender<Eve
             Command::Accept(peer,answer)=>{let result=if let Some(pc)=connections.get(&peer){pc.set_remote_description(answer).await.map_err(|e|e.to_string())}else{Err("Invitation is no longer active".into())};(peer,result)},
             Command::Send(peer,lane,bytes)=>{let sender=senders.lock().unwrap().get(&(peer.clone(),lane)).cloned();let result=sender.ok_or("Peer channel is not ready".to_string()).and_then(|s|{
                 s.queued.fetch_add(1,Ordering::AcqRel);if s.tx.try_send(bytes).is_err(){s.queued.fetch_sub(1,Ordering::AcqRel);Err("Peer is too slow; outbound queue is full".into())}else{Ok(())}
-            });if lane!=0{if let Err(error)=result{let _=events.try_send(Event::State(peer,error));}continue;}(peer,result)},
+            });if lane!=0{if let Err(error)=result{let _=events.try_send(Event::State(error));}continue;}(peer,result)},
             Command::Configure(config)=>{relay=config;continue;},
             Command::Close(peer)=>{if let Some(live)=lives.remove(&peer){live.store(false,Ordering::Release);}routes.remove(&peer);if let Some(pc)=connections.remove(&peer){let _=pc.close().await;}if let Some(tunnel)=tunnels.remove(&peer){cleanup.spawn_blocking(move||drop(tunnel));}senders.lock().unwrap().retain(|(id,_),_|id!=&peer);continue;},
             Command::Stop=>break,

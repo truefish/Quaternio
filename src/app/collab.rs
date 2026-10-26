@@ -7,17 +7,20 @@ struct Bridge{
     epoch:String,actor:String,member:Member,revision:u64,sequence:u64,document:Document,last:Document,
     pending:Vec<Patch>,local_branch:Project,connected:bool,host:bool,undo:Vec<OperationId>,redo:usize,history_pending:bool,
 }
-struct WaveView{key:(u64,u64,u64,u64,u16),id:u64,at:Instant,peaks:Vec<[f32;2]>}
+#[derive(Default)]
+enum Phase{#[default]Idle,Starting,Joining,Hosting,Connected,Reconnecting,Ended}
+struct WaveView{key:(u64,u64,u64,u64,u16,u64,bool),id:u64,at:Instant,peaks:Vec<[f32;2]>}
 struct RemoteView{request:crate::collaboration::media::Request,last_frame:i64,at:Instant}
 #[derive(Default)]
 pub(super) struct State{
-    remote_document:Option<String>,export_requested:bool,filmstrip_request:Option<(u64,playback::filmstrips::FilmstripRequest,Instant)>,waveforms:std::collections::BTreeMap<u64,WaveView>,thumbnail_request:Option<(u64,Instant)>,upload_active:bool,deferred:VecDeque<Event>,remote_media:bool,remote_views:std::collections::BTreeMap<bool,RemoteView>,remote_id:u64,remote_audio:Option<crate::collaboration::media::Audio>,sources:Vec<(u64,PathBuf)>,
+    phase:Phase,error:String,inviting:bool,transfers:Vec<crate::collaboration::TransferProgress>,
+    remote_document:Option<String>,export_requested:bool,export_sequence:Option<String>,filmstrip_request:Option<(u64,playback::filmstrips::FilmstripRequest,Instant)>,waveforms:std::collections::BTreeMap<u64,WaveView>,thumbnail_request:Option<(u64,Instant)>,upload_active:bool,deferred:VecDeque<Event>,remote_media:bool,remote_views:std::collections::BTreeMap<bool,RemoteView>,remote_id:u64,remote_audio:Option<crate::collaboration::media::Audio>,sources:Vec<(u64,PathBuf)>,
     pub(super) service:Option<Session>,bridge:Option<Bridge>,participants:Vec<Participant>,status:String,code:String,
     issues:Vec<String>,branches:Vec<Project>,start_gen:u64,observed_gen:u64,changed_at:Option<Instant>,leave_at:Option<Instant>,
 }
 pub(super) fn request_export(state:&Rc<std::cell::RefCell<AppState>>)->bool{
     if !guest(&state.borrow()){return false;}
-    let mut current=state.borrow_mut();current.status=if readonly(&current){"Only connected editors can request a host export.".into()}else{match current.collaboration.service.as_ref().ok_or("Host disconnected".to_string()).and_then(|service|service.request_export()){Ok(())=>"Export requested. The host chooses the destination and renders the file.".into(),Err(error)=>error}};true
+    let mut current=state.borrow_mut();current.status=if readonly(&current){"Only connected editors can request a host export.".into()}else{match current.collaboration.service.as_ref().ok_or("Host disconnected".to_string()).and_then(|service|service.request_export(current.editor.project.active_sequence.clone())){Ok(())=>"Export requested. The host chooses the destination and renders the file.".into(),Err(error)=>error}};true
 }
 pub(super) fn guest(state:&AppState)->bool{
     state.collaboration.bridge.as_ref().map(|bridge|!bridge.host&&bridge.document.get("document/document_id").and_then(|v|v.as_str())==Some(state.editor.project.document_id.as_str()))
@@ -40,10 +43,10 @@ pub(super) fn remote_preview(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState
     let (seq_w,seq_h,rate)=if let Some(id)=media_id{let Some(media)=current.editor.project.media(id)else{return true;};(media.width,media.height,media.source_rate())}else{let seq=&current.editor.project.sequence;(seq.width,seq.height,seq.frame_rate)};
     let (w,h)=preview_canvas(seq_w.max(2),seq_h.max(2),640,360);let(w,h)=(w.max(2).min(1280),h.max(2).min(720));
     let seeking=if source{current.source.scrub_origin.is_some()}else{current.pointer.down&&current.pointer.seeking};
-    let changed=current.collaboration.remote_views.get(&source).is_none_or(|old|old.request.source!=media_id||old.request.revision!=revision||old.request.width!=w||old.request.height!=h||old.request.playing!=playing||old.request.speed!=speed||(!playing||seeking)&&old.request.frame!=frame||old.at.elapsed()>std::time::Duration::from_secs(3));
+    let changed=current.collaboration.remote_views.get(&source).is_none_or(|old|old.request.sequence!=current.editor.project.active_sequence||old.request.source!=media_id||old.request.revision!=revision||old.request.width!=w||old.request.height!=h||old.request.playing!=playing||old.request.speed!=speed||(!playing||seeking)&&old.request.frame!=frame||old.at.elapsed()>std::time::Duration::from_secs(3));
     if changed{
         current.collaboration.remote_id=current.collaboration.remote_id.wrapping_add(1);
-        let request=crate::collaboration::media::Request{view:if source{1}else{0},id:current.collaboration.remote_id,revision,source:media_id,frame:frame.max(0),width:w,height:h,audio_frames:if playing&&(speed-1.).abs()<0.01{(rate.fps()/15.).ceil().max(1.)as u32}else{0},playing,speed};
+        let request=crate::collaboration::media::Request{sequence:current.editor.project.active_sequence.clone(),view:if source{1}else{0},id:current.collaboration.remote_id,revision,source:media_id,frame:frame.max(0),width:w,height:h,audio_frames:if playing&&(speed-1.).abs()<0.01{(rate.fps()/15.).ceil().max(1.)as u32}else{0},playing,speed};
         let result=current.collaboration.service.as_ref().ok_or("Host disconnected".to_string()).and_then(|service|service.preview(request.clone()));
         if let Err(error)=result{current.collaboration.status=error;}else{
             current.collaboration.remote_views.insert(source,RemoteView{request,last_frame:-1,at:Instant::now()});
@@ -58,7 +61,7 @@ pub(super) fn remote_filmstrips(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppSt
     if current.collaboration.filmstrip_request.as_ref().is_some_and(|(_,_,at)|at.elapsed()<std::time::Duration::from_secs(5)){return true;}
     if let Some(picture)=filmstrips::remote_next(ui,&mut current){
         current.collaboration.remote_id=current.collaboration.remote_id.wrapping_add(1);let id=current.collaboration.remote_id;let revision=current.collaboration.bridge.as_ref().map_or(0,|b|b.revision);
-        let request=crate::collaboration::media::Request{view:3,id,revision,source:Some(picture.media.id),frame:picture.ordinal,width:picture.width,height:picture.height,audio_frames:0,playing:false,speed:0.};
+        let request=crate::collaboration::media::Request{sequence:current.editor.project.active_sequence.clone(),view:3,id,revision,source:Some(picture.media.id),frame:picture.ordinal,width:picture.width,height:picture.height,audio_frames:0,playing:false,speed:0.};
         if let Some(service)=&current.collaboration.service{if service.preview(request).is_ok(){current.collaboration.filmstrip_request=Some((id,picture,Instant::now()));}}
     }true
 }
@@ -72,7 +75,7 @@ pub(super) fn remote_waveforms(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppSta
         for clip in &track.clips{let x=(clip.timeline_start as f64-seq.scroll)as f32*seq.zoom as f32;let width=clip.duration as f32*seq.zoom as f32;
             let left=x.max(0.);let right=(x+width).min(current.timeline_w);let width=right-left;if width<1.||!width.is_finite(){continue;}
             let scale=1./(seq.zoom*seq.frame_rate.fps());let offset=(left-x)as f64*scale;let seconds=width as f64*scale;let count=(width.ceil()as u16).clamp(1,1024);
-            visible.push((clip.id,(clip.media_id,clip.source_start_seconds(seq.frame_rate).to_bits(),offset.to_bits(),seconds.to_bits(),count),offset,seconds));if visible.len()>=16{break;}
+            visible.push((clip.id,(clip.media_id,clip.source_start_seconds(seq.frame_rate).to_bits(),offset.to_bits(),seconds.to_bits(),count,clip.creative.speed.to_bits(),clip.creative.freeze),offset,seconds));if visible.len()>=16{break;}
         }if visible.len()>=16{break;}
     }
     current.collaboration.waveforms.retain(|id,_|visible.iter().any(|(clip,_,_,_)|clip==id));
@@ -98,7 +101,7 @@ pub(super) fn remote_thumbnails(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppSt
     if let Some(media)=candidate{
         current.collaboration.remote_id=current.collaboration.remote_id.wrapping_add(1);let id=current.collaboration.remote_id;
         let revision=current.collaboration.bridge.as_ref().map_or(0,|b|b.revision);let(w,h)=preview_canvas(media.width.max(2),media.height.max(2),160,90);
-        let request=crate::collaboration::media::Request{view:2,id,revision,source:Some(media.id),frame:0,width:w.max(2),height:h.max(2),audio_frames:0,playing:false,speed:0.};
+        let request=crate::collaboration::media::Request{sequence:current.editor.project.active_sequence.clone(),view:2,id,revision,source:Some(media.id),frame:0,width:w.max(2),height:h.max(2),audio_frames:0,playing:false,speed:0.};
         if let Some(service)=&current.collaboration.service{if service.preview(request).is_ok(){current.collaboration.thumbnail_request=Some((id,Instant::now()));}}
     }
     let _=ui;true
@@ -108,6 +111,11 @@ pub(super) fn readonly(state:&AppState)->bool{active(state)&&(state.collaboratio
 pub(super) fn can_undo(state:&AppState)->bool{state.collaboration.bridge.as_ref().is_some_and(|b|b.connected&&b.member.editor&&!b.history_pending&&(!b.undo.is_empty()||!b.pending.is_empty()||state.editor.can_undo()))}
 pub(super) fn can_redo(state:&AppState)->bool{state.collaboration.bridge.as_ref().is_some_and(|b|b.connected&&b.member.editor&&!b.history_pending&&b.redo>0)}
 pub(super) fn sync(ui:&AppWindow,state:&AppState){
+    let current=&state.collaboration;if !active(state){ui.set_session_confirm_end(false);}
+    ui.set_session_phase(match current.phase{Phase::Idle=>"",Phase::Starting=>"Starting…",Phase::Joining=>"Connecting…",Phase::Hosting=>"Hosting",Phase::Connected=>"Connected",Phase::Reconnecting=>"Reconnecting…",Phase::Ended=>"Session ended"}.into());
+    ui.set_session_error(current.error.clone().into());ui.set_session_inviting(current.inviting);
+    ui.set_session_viewer(current.bridge.as_ref().is_some_and(|b|b.connected&&!b.member.editor));
+    ui.set_session_transfers(model(current.transfers.iter().map(|item|TransferItem{id:item.id.clone().into(),name:item.name.clone().into(),percent:if item.total==0{0}else{(item.done.saturating_mul(100)/item.total).min(100)as i32},detail:format!("{:.1} / {:.1} MB",item.done as f64/1_048_576.,item.total as f64/1_048_576.).into(),state:match item.stage{crate::collaboration::TransferStage::Queued=>"Waiting for host",crate::collaboration::TransferStage::Uploading=>"Uploading",crate::collaboration::TransferStage::Receiving=>"Receiving",crate::collaboration::TransferStage::Finishing=>"Checking upload"}.into(),cancellable:item.cancellable}).collect()));
     let current=&state.collaboration;ui.set_session_export_requested(current.export_requested);ui.set_session_upload_active(current.upload_active);ui.set_session_connected(current.bridge.as_ref().is_some_and(|b|b.connected));ui.set_session_active(current.service.is_some());ui.set_session_readonly(readonly(state));
     ui.set_session_auto_connect(if current.code.is_empty(){!state.preferences.relay.service_url.is_empty()||state.preferences.relay.uses_public()}else{current.code.starts_with("quaternio-join-v1:")});ui.set_session_simple_code(current.code.starts_with("quaternio-join-v1:"));
     ui.set_session_host(current.bridge.as_ref().is_some_and(|b|b.host));ui.set_session_status(current.status.clone().into());
@@ -117,10 +125,10 @@ pub(super) fn sync(ui:&AppWindow,state:&AppState){
     ui.set_session_revision(current.bridge.as_ref().map(|b|format!("Revision {} · {} pending",b.revision,b.pending.len())).unwrap_or_default().into());
 }
 fn record_issue(state:&mut AppState,reason:String){
+    let preserve=state.collaboration.bridge.as_ref().is_some_and(|b|!b.pending.is_empty()||b.history_pending||document::capture(&state.editor.project)!=b.last);
     let branch=state.collaboration.bridge.as_ref().filter(|b|document::capture(&state.editor.project)==b.last).map(|b|b.local_branch.clone()).unwrap_or_else(||state.editor.project.clone());
     let c=&mut state.collaboration;
-    if c.issues.len()>=64{c.issues.remove(0);}c.issues.push(reason.clone());
-    c.status=reason; if c.branches.len()>=8{c.branches.remove(0);}c.branches.push(branch);
+    if preserve{if c.issues.len()>=64{c.issues.remove(0);}c.issues.push(reason);c.error.clear();if c.branches.len()>=8{c.branches.remove(0);}c.branches.push(branch);}else{c.error=reason;}
 }
 fn flush(state:&mut AppState)->Result<bool,String>{
     let c=&mut state.collaboration;let Some(b)=c.bridge.as_mut()else{return Ok(false);};
@@ -198,18 +206,22 @@ pub(super) fn handle(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>,comma
             if active(&state.borrow()){return Err("Leave the current session first".into());}
             let s=state.borrow();if s.pointer.down||s.import_rx.is_some(){return Err("Finish the current drag or import before hosting".into());}
             let service=Session::host_with_relay(s.editor.project.clone(),ui.get_session_name().to_string(),s.preferences.relay.clone())?;let generation=s.edit_gen;drop(s);
-            state.borrow_mut().collaboration=State{service:Some(service),status:"Starting your session…".into(),start_gen:generation,observed_gen:generation,..Default::default()};
+            state.borrow_mut().collaboration=State{phase:Phase::Starting,service:Some(service),status:"Starting your session…".into(),start_gen:generation,observed_gen:generation,..Default::default()};
         },
         "session-join"=>{
             if active(&state.borrow()){return Err("Leave the current session first".into());}
             if !confirm_unsaved(ui,state){return Ok(());}
             let service=Session::join_with_relay(ui.get_session_input().as_str(),state.borrow().preferences.relay.clone())?;let generation=state.borrow().edit_gen;
-            state.borrow_mut().collaboration=State{service:Some(service),status:"Connecting…".into(),start_gen:generation,observed_gen:generation,..Default::default()};
+            state.borrow_mut().collaboration=State{phase:Phase::Joining,service:Some(service),status:"Connecting…".into(),start_gen:generation,observed_gen:generation,..Default::default()};
         },
-        "session-export"=>{state.borrow_mut().collaboration.export_requested=false;on_command(ui,state,"export-view");},
+        "session-export"=>{{let mut s=state.borrow_mut();s.collaboration.export_requested=false;if let Some(id)=s.collaboration.export_sequence.take(){s.editor.project.switch_sequence(&id)?;}}note(state);full_sync(ui,state);on_command(ui,state,"export-view");},
         "session-upload"=>{if readonly(&state.borrow()){return Err("Only connected editors can upload media".into());}import_media(ui,state);},
         "session-cancel-uploads"=>state.borrow().collaboration.service.as_ref().ok_or("No active session")?.cancel_upload(String::new())?,
-        "session-invite"=>state.borrow().collaboration.service.as_ref().ok_or("Host a session first")?.invite(ui.get_session_invitee().to_string(),ui.get_session_editor_role())?,
+        "session-dismiss-error"=>state.borrow_mut().collaboration.error.clear(),
+        "session-invite"=>{let mut s=state.borrow_mut();if s.collaboration.inviting{return Ok(());}
+            let name=ui.get_session_invitee().trim().to_string();let name=if name.is_empty(){format!("Guest {}",s.collaboration.participants.iter().filter(|p|p.state!="Revoked").count().max(1))}else{name};
+            s.collaboration.service.as_ref().ok_or("Host a session first")?.invite(name,ui.get_session_editor_role())?;s.collaboration.inviting=true;s.collaboration.error.clear();
+        },
         "session-accept"=>state.borrow().collaboration.service.as_ref().ok_or("Host a session first")?.signal(ui.get_session_input().to_string())?,
         "session-load-code"|"session-open-invitation"|"session-open-reply"=>{
             if let Some(path)=rfd::FileDialog::new().set_title("Open Quaternio connection file").add_filter("Connection",&["qpeer"]).pick_file(){
@@ -238,7 +250,10 @@ pub(super) fn handle(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>,comma
             let branch=state.borrow().collaboration.branches.last().cloned().ok_or("No rejected branch to save")?;
             if let Some(path)=rfd::FileDialog::new().set_title("Save retained local branch").add_filter("Quaternio",&["quaternio"]).set_file_name("local-branch.quaternio").save_file(){branch.save_to(&path)?;}
         },
-        "session-leave"=>{
+        "session-leave"|"session-end-confirmed"=>{
+            let needs_confirmation={let s=state.borrow();s.collaboration.bridge.as_ref().is_some_and(|b|b.host)&&s.collaboration.participants.iter().any(|p|p.state=="Connected"&&p.id!=s.collaboration.bridge.as_ref().unwrap().actor)};
+            if needs_confirmation&&command!="session-end-confirmed"{ui.set_session_confirm_end(true);return Ok(());}
+            ui.set_session_confirm_end(false);
             let mut s=state.borrow_mut();
             if s.pointer.down||s.import_rx.is_some(){return Err("Finish the current drag or import before leaving".into());}
             if s.collaboration.leave_at.is_some(){finish_leave(&mut s);}else{
@@ -248,14 +263,14 @@ pub(super) fn handle(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>,comma
                 }else{finish_leave(&mut s);}
             }
         },
-        _=>{if let Some(id)=command.strip_prefix("session-revoke:"){state.borrow().collaboration.service.as_ref().ok_or("No active session")?.revoke(id.into())?;}else{return Err("Unknown session action".into());}},
+        _=>{if let Some(id)=command.strip_prefix("session-cancel-upload:"){state.borrow().collaboration.service.as_ref().ok_or("No active session")?.cancel_upload(id.into())?;}else if let Some(id)=command.strip_prefix("session-revoke:"){state.borrow().collaboration.service.as_ref().ok_or("No active session")?.revoke(id.into())?;}else{return Err("Unknown session action".into());}},
     }Ok(())})();
-    if let Err(error)=result{state.borrow_mut().collaboration.status=error;}sync(ui,&state.borrow());true
+    if let Err(error)=result{let mut s=state.borrow_mut();s.collaboration.error=error;s.collaboration.inviting=false;}sync(ui,&state.borrow());true
 }
 fn finish_leave(state:&mut AppState){
     if state.collaboration.bridge.as_ref().is_some_and(|b|!b.pending.is_empty()||b.history_pending){record_issue(state,"The session ended with pending edits. A local branch has been retained.".into());}
     state.playing=false;state.source.stop();state.audio.stop();
-    let c=&mut state.collaboration;c.remote_audio=None;c.remote_media=false;c.remote_views.clear();c.filmstrip_request=None;c.thumbnail_request=None;c.waveforms.clear();c.deferred.clear();c.sources.clear();c.service=None;c.bridge=None;c.participants.clear();c.leave_at=None;c.status="Session ended. Your document and retained branches remain available locally.".into();
+    let c=&mut state.collaboration;c.remote_audio=None;c.remote_media=false;c.remote_views.clear();c.filmstrip_request=None;c.thumbnail_request=None;c.waveforms.clear();c.deferred.clear();c.sources.clear();c.service=None;c.bridge=None;c.participants.clear();c.phase=Phase::Ended;c.inviting=false;c.transfers.clear();c.code.clear();c.leave_at=None;c.status="Session ended. Your document and retained branches remain available locally.".into();
     state.editor.clear_shared_history();state.editor.project.ensure_integrity();
 }
 pub(super) fn pump(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
@@ -275,7 +290,7 @@ pub(super) fn pump(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
     };
     if busy{
         let mut immediate=Vec::new();let mut s=state.borrow_mut();
-        for event in events{if matches!(&event,Event::Preview(_)|Event::Waveform(_)|Event::Status(_)|Event::MediaAvailable(_)|Event::UploadState(_)){immediate.push(event);}else if s.collaboration.deferred.len()<256{s.collaboration.deferred.push_back(event);}else{record_issue(&mut s,"Too many remote changes during this gesture. Release the pointer to catch up.".into());}}
+        for event in events{if matches!(&event,Event::Preview(_)|Event::Waveform(_)|Event::Status(_)|Event::MediaAvailable(_)|Event::UploadState(_)|Event::Transfers(_)|Event::OperationFailed(_)){immediate.push(event);}else if s.collaboration.deferred.len()<256{s.collaboration.deferred.push_back(event);}else{record_issue(&mut s,"Too many remote changes during this gesture. Release the pointer to catch up.".into());}}
         events=immediate;
     }
     if !busy&&!events.is_empty(){
@@ -284,12 +299,14 @@ pub(super) fn pump(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
     }
     let mut uploaded=Vec::new();
     for event in events{changed|=!matches!(&event,Event::Preview(_)|Event::Waveform(_));let mut s=state.borrow_mut();match event{
-        Event::ExportRequested(name)=>{s.collaboration.export_requested=true;s.collaboration.status=format!("{name} requested an export. Choose Export on the host to review settings and destination.");},
+        Event::ExportRequested(name,sequence)=>{let label=s.editor.project.sequence_by_id(&sequence).map(|s|s.name.clone()).unwrap_or(sequence.clone());s.collaboration.export_requested=true;s.collaboration.export_sequence=Some(sequence);s.collaboration.status=format!("{name} requested an export of {label}. Choose Export on the host to review settings and destination.");},
         Event::MediaChanged=>{s.collaboration.remote_views.clear();s.collaboration.waveforms.clear();s.collaboration.filmstrip_request=None;s.collaboration.thumbnail_request=None;s.collaboration.filmstrip_request=None;s.thumbnail_cache.clear();s.filmstrips.reset();if let Some(audio)=&s.collaboration.remote_audio{audio.clear();}},
         Event::Waveform(packet)=>{if let Some(view)=s.collaboration.waveforms.get_mut(&packet.request.clip){if view.id==packet.request.id{view.peaks=packet.peaks;ui.set_clips(model(clip_views(&s)));}}},
+        Event::OperationFailed(reason)=>{s.collaboration.error=reason;s.collaboration.inviting=false;},
+        Event::Transfers(items)=>s.collaboration.transfers=items,
         Event::UploadState(active)=>s.collaboration.upload_active=active,
-        Event::Reconnecting=>{if let Some(bridge)=&mut s.collaboration.bridge{bridge.connected=false;}s.playing=false;s.source.stop();s.audio.stop();if let Some(audio)=&s.collaboration.remote_audio{audio.clear();}s.collaboration.remote_views.clear();s.collaboration.status="Connection interrupted. Reconnecting to the host automatically…".into();},
-        Event::Resumed{document,revision,next_sequence}=>{
+        Event::Reconnecting=>{s.collaboration.phase=Phase::Reconnecting;if let Some(bridge)=&mut s.collaboration.bridge{bridge.connected=false;}s.playing=false;s.source.stop();s.audio.stop();if let Some(audio)=&s.collaboration.remote_audio{audio.clear();}s.collaboration.remote_views.clear();s.collaboration.status="Connection interrupted. Reconnecting to the host automatically…".into();},
+        Event::Resumed{document,revision,next_sequence}=>{s.collaboration.phase=Phase::Connected;s.collaboration.error.clear();
             if let Some(bridge)=&mut s.collaboration.bridge{bridge.document=document;bridge.revision=revision;bridge.sequence=bridge.sequence.max(next_sequence);bridge.pending.retain(|patch|patch.id.sequence>=next_sequence);bridge.connected=true;bridge.history_pending=false;}
             if let Err(error)=apply_projection(&mut s){record_issue(&mut s,error);}s.collaboration.remote_views.clear();s.collaboration.status="Reconnected. Your edits are synchronized.".into();
         },
@@ -308,13 +325,13 @@ pub(super) fn pump(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
             let source=packet.request.source.is_some();
             let valid=s.collaboration.remote_views.get(&source).is_some_and(|view|view.request.id==packet.request.id&&view.request.revision==packet.request.revision&&view.request.source==packet.request.source)
                 &&s.collaboration.bridge.as_ref().is_some_and(|b|b.revision==packet.request.revision&&b.connected&&!b.host);
-            if !valid{continue;}
+            if !valid||(!source&&packet.request.sequence!=s.editor.project.active_sequence){continue;}
             match packet.decode(){
                 Ok((image,samples))=>{
                     if let Some(view)=s.collaboration.remote_views.get_mut(&source){view.last_frame=packet.request.frame;view.at=Instant::now();}
                     if source{ui.set_source_image(to_image(&image));ui.set_show_source_picture(true);s.source_request_pending=false;s.source_feedback.picture(true,Instant::now());s.source.waiting_picture=false;s.source.waiting_audio=false;
                         if s.source.playing{s.source.remote_picture(packet.request.frame);}
-                    }else{ui.set_viewer_image(to_image(&image));ui.set_show_picture(true);s.program_request_pending=false;s.program_feedback.picture(true,Instant::now());s.waiting_picture=false;s.waiting_audio=false;
+                    }else{picture::scopes(ui,&image);ui.set_viewer_image(to_image(&image));ui.set_show_picture(true);s.program_request_pending=false;s.program_feedback.picture(true,Instant::now());s.waiting_picture=false;s.waiting_audio=false;
                         if s.playing{s.editor.project.sequence.playhead=packet.request.frame;s.anchor_frame=packet.request.frame;s.anchor_at=Instant::now();}
                     }
                     if !samples.is_empty()&&if source{s.source.playing}else{s.playing}{if let Some(audio)=&s.collaboration.remote_audio{audio.push(samples);}}
@@ -325,8 +342,8 @@ pub(super) fn pump(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
         },
         Event::Uploaded(path)=>uploaded.push(path),
         Event::MediaAvailable(available)=>{s.collaboration.remote_media=available;if available&&s.collaboration.remote_audio.is_none(){s.collaboration.remote_audio=Some(crate::collaboration::media::Audio::new());}if !available{s.collaboration.status="This host needs an updated Quaternio build to stream media.".into();}},
-        Event::Ready{epoch,actor,member,document,revision,next_sequence,host}=>{
-            if s.collaboration.start_gen!=s.edit_gen&&s.collaboration.bridge.is_none(){s.collaboration.service=None;s.collaboration.status="The project changed while connecting. Your edits were retained; start the session again.".into();continue;}
+        Event::Ready{epoch,actor,member,document,revision,next_sequence,host}=>{s.collaboration.phase=if host{Phase::Hosting}else{Phase::Connected};s.collaboration.error.clear();
+            if s.collaboration.start_gen!=s.edit_gen&&s.collaboration.bridge.is_none(){s.collaboration.service=None;s.collaboration.phase=Phase::Ended;s.collaboration.error="The project changed while connecting. Your edits were retained; start the session again.".into();continue;}
             s.collaboration.remote_views.clear();s.collaboration.waveforms.clear();s.collaboration.filmstrip_request=None;s.collaboration.thumbnail_request=None;
             if !host{s.thumbnail_cache.clear();s.waveform_results.clear();s.filmstrips.reset();}
             let last=document.clone();let mut project=match document::materialize(&document){Ok(p)=>p,Err(error)=>{s.collaboration.status=error;continue;}};
@@ -339,11 +356,11 @@ pub(super) fn pump(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
             s.collaboration.bridge=Some(Bridge{epoch,actor,member,revision,sequence:next_sequence,document,last,pending:Vec::new(),local_branch,connected:true,host,undo:Vec::new(),redo:0,history_pending:false});
             s.collaboration.status=if host{"Session started. Invite someone to edit with you."}else{"Connected. Your edits are shared automatically."}.into();note_borrowed(&mut s);
         },
-        Event::Code(code)=>{let simple=code.starts_with("quaternio-join-v1:");s.collaboration.code=code;s.collaboration.status=if simple{"Invite ready. Send the code privately; your guest can join immediately."}else if s.collaboration.bridge.as_ref().is_some_and(|b|b.host){"Invitation ready. Save it and send it privately."}else{"Your reply is ready. Send it back to the host."}.into();},
+        Event::Code(code)=>{s.collaboration.inviting=false;let simple=code.starts_with("quaternio-join-v1:");s.collaboration.code=code;s.collaboration.status=if simple{"Invite ready. Send the code privately; your guest can join immediately."}else if s.collaboration.bridge.as_ref().is_some_and(|b|b.host){"Invitation ready. Save it and send it privately."}else{"Your reply is ready. Send it back to the host."}.into();},
         Event::Participants(peers)=>s.collaboration.participants=peers,
         Event::Status(message)=>s.collaboration.status=match message.as_str(){"ICE New"|"ICE Checking"|"Peer New"|"Peer Connecting"=>"Connecting…".into(),"ICE Connected"|"ICE Completed"|"Peer Connected"=>"Connection established. Finishing setup…".into(),"ICE Disconnected"|"Peer Disconnected"=>"Connection interrupted. Waiting to reconnect to the host…".into(),_=>message},
         Event::Conflict(reason)=>{if s.collaboration.issues.len()>=64{s.collaboration.issues.remove(0);}s.collaboration.issues.push(reason);},
-        Event::Ended(reason)=>{s.playing=false;s.source.stop();s.audio.stop();if let Some(audio)=&s.collaboration.remote_audio{audio.clear();}record_issue(&mut s,reason);if let Some(b)=&mut s.collaboration.bridge{b.connected=false;}s.collaboration.service=None;s.editor.clear_shared_history();s.editor.project.ensure_integrity();},
+        Event::Ended(reason)=>{s.collaboration.phase=Phase::Ended;s.collaboration.inviting=false;s.collaboration.transfers.clear();s.playing=false;s.source.stop();s.audio.stop();if let Some(audio)=&s.collaboration.remote_audio{audio.clear();}if s.collaboration.bridge.as_ref().is_some_and(|b|b.pending.is_empty()&&!b.history_pending&&document::capture(&s.editor.project)==b.last){s.collaboration.status=reason;s.collaboration.error.clear();}else{record_issue(&mut s,reason);}if let Some(b)=&mut s.collaboration.bridge{b.connected=false;}s.collaboration.service=None;s.editor.clear_shared_history();s.editor.project.ensure_integrity();},
         Event::Rejected{id,reason}=>{
             record_issue(&mut s,reason);if let Some(b)=&mut s.collaboration.bridge{b.pending.retain(|p|p.id!=id);b.history_pending=false;}
             if let Err(error)=apply_projection(&mut s){s.collaboration.status=error;}

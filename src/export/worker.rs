@@ -198,7 +198,10 @@ struct Process {
 }
 impl Process {
     fn new(child: Child) -> Result<Self, String> {
+        #[cfg(windows)]
         let mut process = Self { child, cleaned: false, #[cfg(windows)] job: None };
+        #[cfg(not(windows))]
+        let process = Self { child, cleaned: false };
         #[cfg(windows)]
         { process.job = Some(containment::Job::assign(&process.child)
             .map_err(|e| format!("Could not contain export worker: {e}"))?); }

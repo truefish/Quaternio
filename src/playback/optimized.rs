@@ -266,9 +266,6 @@ impl OptimizedCache {
         self.lookup_inner(media, ordinal, Some((expected_bytes, expected_modified)))
     }
 
-    pub fn lookup(&self, media: &Media, ordinal: i64) -> Option<PreparedFrame> {
-        self.lookup_inner(media, ordinal, None)
-    }
     fn lookup_inner(
         &self,
         media: &Media,

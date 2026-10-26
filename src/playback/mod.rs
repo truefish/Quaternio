@@ -1,4 +1,8 @@
+mod text;
 mod audio;
+pub(crate) mod sync_audio;
+pub(crate) mod precision;
+pub(crate) mod gpu_composite;
 mod meters;
 mod composite;
 mod decode;
@@ -11,23 +15,24 @@ pub use decode::set_preview_hardware;
 pub mod telemetry;
 mod thumbnails;
 
-pub use audio::{mix_range, Pcm};
+pub use audio::Pcm;
 pub use meters::MeterSnapshot;
 pub use composite::{composite, FrameSource, ImageBuf};
-pub use decode::{find_ffmpeg, find_ffprobe, parse_probe, probe_path, probe_path_cancellable, CachingSource};
+pub(crate) use composite::picture_route;
+pub use decode::{find_ffmpeg, find_ffprobe, probe_path, probe_path_cancellable, CachingSource};
 pub(crate) use decode::decode_audio_window;
-pub use thumbnails::{Thumbnail, ThumbnailEngine};
+pub use thumbnails::ThumbnailEngine;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::project::{FrameRate, Project, TrackKind};
+use crate::project::{FrameRate, Project};
 pub(crate) use audio::{
-    mix_window_range, required_audio_windows, PcmWindow, WindowBuffers, PREVIEW_WINDOW_SAMPLES };
+    mix_window_range_checked, required_audio_windows_checked, PcmWindow, WindowBuffers, PREVIEW_WINDOW_SAMPLES };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct AudioWindowKey {
@@ -222,7 +227,7 @@ impl PlaybackAudioSource {
         stop: &AtomicBool,
     ) -> Result<WindowBuffers, String> {
         let mut buffers = WindowBuffers::new();
-        for (id, block) in required_audio_windows(project, cursor, frames) {
+        for (id, block) in required_audio_windows_checked(project, cursor, frames, stop)? {
             if stop.load(Ordering::Acquire) {
                 return Err("Media decode cancelled".into());
             }
@@ -238,7 +243,8 @@ impl PlaybackAudioSource {
     }
 
     fn prefetch(&mut self, project: &Project, cursor: i64, frames: i64, stop: &Arc<AtomicBool>) {
-        for (id, block) in required_audio_windows(project, cursor, frames) {
+        let Ok(needed) = required_audio_windows_checked(project, cursor, frames, stop) else { return; };
+        for (id, block) in needed {
             if stop.load(Ordering::Acquire) {
                 return;
             }
@@ -337,9 +343,7 @@ pub struct PreviewEngine {
     worker: Option<thread::JoinHandle<()>> }
 
 impl PreviewEngine {
-    pub fn native_stats(&self) -> Option<native_preview::NativePreviewStats> {
-        self.mailbox.0.lock().ok()?.native_stats.clone()
-    }
+
     pub fn set_optimized_cache(&self, cache: Option<Arc<optimized::OptimizedCache>>) {
         let (lock, ready) = &*self.mailbox;
         let mut mailbox = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -700,32 +704,6 @@ impl AudioEngine {
     }
 }
 
-fn playable_pcm(pcm: &Pcm) -> bool {
-    pcm.sample_rate > 0 && pcm.samples.len() >= 2
-}
-
-fn playback_audio_result(
-    path: &Path,
-    usable: bool,
-    error: Option<String>,
-    stop: &AtomicBool,
-) -> Result<bool, String> {
-    // Stop and media switches cancel the worker instead of publishing its old
-    // decoder failure. AudioEngine's generation guard checks again on return.
-    if stop.load(Ordering::Acquire) {
-        return Ok(false);
-    }
-    if let Some(error) = error {
-        return Err(error);
-    }
-    if !usable {
-        return Err(format!(
-            "Could not decode audio {}: no usable audio samples were produced",
-            path.display()
-        ));
-    }
-    Ok(true)
-}
 
 fn mark_audio_ready(
     stop: &Arc<AtomicBool>,
@@ -817,7 +795,7 @@ fn play_from(
             Ok(buffers) => buffers,
             Err(_) if stop.load(Ordering::Acquire) => break,
             Err(error) => return Err(error) };
-        let (mixed, peaks) = audio::mix_window_range_metered(&project, cursor, frames, &buffers);
+        let (mixed, peaks) = audio::mix_window_range_metered(&project, cursor, frames, &buffers, stop)?;
         if !mixed.is_empty() {
             if !sent_ready {
                 if !mark_audio_ready(stop, active_stop, ready) {

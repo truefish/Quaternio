@@ -259,17 +259,6 @@ pub fn path_looks_like_timeline(path: &Path) -> bool {
     )
 }
 
-pub fn suggested_filters() -> Vec<(&'static str, Vec<&'static str>)> {
-    vec![
-        (
-            "Premiere / Resolve / FCPXML",
-            vec!["prproj", "drp", "fcpxml", "xml"],
-        ),
-        ("Premiere project", vec!["prproj"]),
-        ("DaVinci Resolve project", vec!["drp"]),
-        ("FCPXML / XML", vec!["fcpxml", "xml"]),
-    ]
-}
 
 pub fn resolve_media_path(raw: &str, xml_dir: &Path) -> PathBuf {
     let trimmed = raw.trim();

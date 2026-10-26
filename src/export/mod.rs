@@ -107,7 +107,7 @@ fn export_audio_media(project: &Project, start: i64, end: i64) -> HashSet<u64> {
         }
         for clip in &track.clips {
             if clip.end() > start && clip.timeline_start < end && clip.volume > 0.0 {
-                used.insert(clip.media_id);
+                if clip.media_id!=0 {used.insert(clip.media_id);}
             }
         }
         for transition in &project.sequence.transitions {
@@ -126,7 +126,7 @@ fn export_audio_media(project: &Project, start: i64, end: i64) -> HashSet<u64> {
                 continue;
             };
             if outgoing.volume > 0.0 {
-                used.insert(outgoing.media_id);
+                if outgoing.media_id!=0 {used.insert(outgoing.media_id);}
             }
             if matches!(transition.anchor, Anchor::Cut(_)) {
                 if let Some(incoming) = track
@@ -138,13 +138,28 @@ fn export_audio_media(project: &Project, start: i64, end: i64) -> HashSet<u64> {
                     .min_by_key(|clip| (clip.timeline_start, clip.id))
                 {
                     if incoming.volume > 0.0 {
-                        used.insert(incoming.media_id);
+                        if incoming.media_id!=0 {used.insert(incoming.media_id);}
                     }
                 }
             }
         }
     }
+    expand_sequence_media(project,&mut used,start,end);
     used
+}
+
+fn expand_sequence_media(project:&Project,used:&mut HashSet<u64>,start:i64,end:i64){
+    used.remove(&0);
+    for c in project.sequence.tracks.iter().filter(|t|!t.muted).flat_map(|t|&t.clips).filter(|c|c.timeline_start<end&&c.end()>start){
+        if let Some(m)=&c.creative.multicam{used.extend(m.angles.iter().map(|a|a.media_id));}
+        if let Some(id)=c.creative.sequence.as_deref(){
+            let mut child=project.clone();if child.switch_sequence(id).is_err(){continue;}
+            let rate=project.sequence.frame_rate;let first=c.source_time_seconds(start.max(c.timeline_start)-c.timeline_start,rate);let last=c.source_time_seconds(end.min(c.end())-c.timeline_start,rate);
+            let a=(first.min(last)*child.sequence.frame_rate.fps()).floor()as i64;let b=(first.max(last)*child.sequence.frame_rate.fps()).ceil()as i64;
+            for c in child.sequence.tracks.iter().filter(|t|!t.muted).flat_map(|t|&t.clips).filter(|c|c.timeline_start<b&&c.end()>a&&c.media_id!=0){used.insert(c.media_id);}
+            expand_sequence_media(&child,used,a,b);
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -163,8 +178,17 @@ pub enum RenderSpeed {
     Fast,
     Compact }
 
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq,Hash,serde::Serialize,serde::Deserialize)]
+pub enum Delivery { #[default] H264, Hevc, Wav }
+fn burn_captions_default()->bool{true}
+impl Delivery {fn stream_format(self)->&'static str{if self==Self::Hevc{"hevc"}else{"h264"}}}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExportSettings {
+    #[serde(default="burn_captions_default")]pub burn_captions:bool,
+    #[serde(default)]
+    pub delivery: Delivery,
+    #[serde(default)]
+    pub backend: Option<String>,
     pub width: u32,
     pub height: u32,
     pub frame_rate: FrameRate,
@@ -202,12 +226,12 @@ enum VideoEncoder {
 impl VideoEncoder {
     fn label(&self) -> &'static str {
         match self {
-            Self::Cpu => "CPU H.264",
-            Self::Nvenc => "NVIDIA H.264",
-            Self::Qsv => "Intel H.264",
-            Self::Amf(_) => "AMD H.264",
-            Self::VideoToolbox => "Apple VideoToolbox H.264",
-            Self::Vaapi(_) => "VAAPI H.264" }
+            Self::Cpu => "CPU",
+            Self::Nvenc => "NVIDIA",
+            Self::Qsv => "Intel",
+            Self::Amf(_) => "AMD",
+            Self::VideoToolbox => "Apple VideoToolbox",
+            Self::Vaapi(_) => "VAAPI" }
     }
 
     fn description(&self) -> String {
@@ -230,9 +254,9 @@ impl VideoEncoder {
 
     fn software_frame_filter(&self) -> &'static str {
         match self {
-            Self::Cpu => "format=yuv420p",
-            Self::Vaapi(_) => "format=nv12,hwupload",
-            _ => "format=nv12",
+            Self::Cpu => "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
+            Self::Vaapi(_) => "scale=out_color_matrix=bt709:out_range=tv,format=nv12,hwupload",
+            _ => "scale=out_color_matrix=bt709:out_range=tv,format=nv12",
         }
     }
 
@@ -245,6 +269,8 @@ impl VideoEncoder {
     }
 
     fn configure(&self, command: &mut Command, settings: &ExportSettings) {
+        command.args(["-color_primaries","bt709","-color_trc","bt709","-colorspace","bt709","-color_range","tv"]);
+        if settings.delivery==Delivery::Hevc{command.args(["-tag:v","hvc1"]);}
         let quality = settings.crf.clamp(1, 40).to_string();
         let speed = settings.speed;
         let preset = match (self, speed) {
@@ -264,15 +290,16 @@ impl VideoEncoder {
             (Self::VideoToolbox | Self::Vaapi(_), _) => "" };
         match self {
             Self::Cpu => {
-                command.args(["-c:v", "libx264", "-preset", preset, "-crf", &quality]);
+                command.args(["-c:v", if settings.delivery==Delivery::Hevc{"libx265"}else{"libx264"}, "-preset", preset, "-crf", &quality]);
                 let threads = std::thread::available_parallelism()
                     .map_or(2, |count| count.get().saturating_sub(2).clamp(1, 8));
                 command.args(["-threads:v", &threads.to_string()]);
+                if settings.delivery==Delivery::Hevc{command.args(["-x265-params",&format!("pools={threads}:frame-threads=1")]);}
             }
             Self::Nvenc => {
                 command.args([
                     "-c:v",
-                    "h264_nvenc",
+                    if settings.delivery==Delivery::Hevc{"hevc_nvenc"}else{"h264_nvenc"},
                     "-preset",
                     preset,
                     "-rc",
@@ -286,7 +313,7 @@ impl VideoEncoder {
             Self::Qsv => {
                 command.args([
                     "-c:v",
-                    "h264_qsv",
+                    if settings.delivery==Delivery::Hevc{"hevc_qsv"}else{"h264_qsv"},
                     "-preset",
                     preset,
                     "-global_quality",
@@ -295,7 +322,7 @@ impl VideoEncoder {
             }
             Self::Amf(_) => {
                 command.args([
-                    "-c:v", "h264_amf", "-quality", preset, "-rc", "cqp", "-qp_i", &quality,
+                    "-c:v", if settings.delivery==Delivery::Hevc{"hevc_amf"}else{"h264_amf"}, "-quality", preset, "-rc", "cqp", "-qp_i", &quality,
                     "-qp_p", &quality, "-qp_b", &quality,
                 ]);
             }
@@ -309,7 +336,7 @@ impl VideoEncoder {
                     * 2.0_f64.powf((21.0 - settings.crf.clamp(1, 40) as f64) / 6.0))
                     .clamp(100_000.0, 240_000_000.0).round() as u64;
                 command.args([
-                    "-c:v", "h264_videotoolbox", "-allow_sw", "0", "-b:v",
+                    "-c:v", if settings.delivery==Delivery::Hevc{"hevc_videotoolbox"}else{"h264_videotoolbox"}, "-allow_sw", "0", "-b:v",
                     &bitrate.to_string(), "-realtime",
                     if speed == RenderSpeed::Fast { "1" } else { "0" },
                 ]);
@@ -318,7 +345,7 @@ impl VideoEncoder {
                 // CQP avoids driver-dependent ICQ/QVBR support. No B frames
                 // also accommodates older and low-end VAAPI H.264 devices.
                 command.args([
-                    "-c:v", "h264_vaapi", "-rc_mode", "CQP", "-qp", &quality,
+                    "-c:v", if settings.delivery==Delivery::Hevc{"hevc_vaapi"}else{"h264_vaapi"}, "-rc_mode", "CQP", "-qp", &quality,
                     "-bf", "0",
                 ]);
             }
@@ -465,6 +492,12 @@ fn prepare_mixed_audio(
     audio::prepare(project, start, end, cancel, progress)
 }
 
+pub(crate) fn with_speech_audio<T>(project:&Project,cancel:&AtomicBool,run:impl FnOnce(&Path)->Result<T,String>)->Result<T,String>{
+    let(tx,_rx)=std::sync::mpsc::channel();
+    let pcm=prepare_mixed_audio(project,0,project.sequence.duration_frames(),cancel,&tx)?;
+    run(&pcm.path)
+}
+
 fn preflight_media(project: &Project, settings: &ExportSettings) -> Result<(), String> {
     let (start, end) = export_range(project, settings)?;
     let rate = project.sequence.frame_rate;
@@ -477,7 +510,7 @@ fn preflight_media(project: &Project, settings: &ExportSettings) -> Result<(), S
         }
         for clip in &track.clips {
             if clip.timeline_start < end && clip.end() > start {
-                used.insert(clip.media_id);
+                if clip.media_id!=0 {used.insert(clip.media_id);}
             }
         }
         for transition in &project.sequence.transitions {
@@ -492,7 +525,7 @@ fn preflight_media(project: &Project, settings: &ExportSettings) -> Result<(), S
                 .iter()
                 .find(|clip| clip.id == transition.anchor.clip_id())
             {
-                used.insert(outgoing.media_id);
+                if outgoing.media_id!=0 {used.insert(outgoing.media_id);}
                 if matches!(transition.anchor, Anchor::Cut(_)) {
                     if let Some(incoming) = track
                         .clips
@@ -502,12 +535,13 @@ fn preflight_media(project: &Project, settings: &ExportSettings) -> Result<(), S
                         })
                         .min_by_key(|clip| (clip.timeline_start, clip.id))
                     {
-                        used.insert(incoming.media_id);
+                        if incoming.media_id!=0 {used.insert(incoming.media_id);}
                     }
                 }
             }
         }
     }
+    expand_sequence_media(project,&mut used,start,end);
     let output = settings.output.canonicalize().ok();
     for id in used {
         let media = project
@@ -528,6 +562,7 @@ fn preflight_media(project: &Project, settings: &ExportSettings) -> Result<(), S
         if track.clips.iter().any(|clip| {
             clip.timeline_start < end
                 && clip.end() > start
+                && clip.creative.text.is_none() && clip.creative.sequence.is_none() && !clip.creative.adjustment
                 && !project
                     .media(clip.media_id)
                     .is_some_and(|media| media.has_video)
@@ -555,6 +590,7 @@ fn preflight_media(project: &Project, settings: &ExportSettings) -> Result<(), S
 }
 
 fn direct_export_plan(project: &Project, settings: &ExportSettings) -> Option<DirectExport> {
+    if crate::playback::precision::needed(project){return None;}
     let rate = project.sequence.frame_rate;
     if settings.force_composite || settings.frame_rate != rate || rate.fps() < 1.0 {
         return None;
@@ -596,7 +632,7 @@ fn direct_export_plan(project: &Project, settings: &ExportSettings) -> Option<Di
         || video.pos_y != 0.0
         || video.opacity != 1.0
         || !video.grade.is_identity()
-        || !video.transform.is_identity()
+        || !video.transform.is_identity() || !video.creative.is_identity()
     {
         return None;
     }
@@ -652,7 +688,9 @@ fn direct_audio_route(
     }) {
         return DirectAudioRoute::Mixed;
     }
+    if project.sequence.tracks.iter().filter(|t|t.kind==TrackKind::Audio).flat_map(|t|&t.clips).any(|c|c.timeline_start<end&&c.end()>start&&!c.creative.is_identity()){return DirectAudioRoute::Mixed;}
     let rate = project.sequence.frame_rate;
+    if !project.sequence.audio.is_identity(){return DirectAudioRoute::Mixed;}
     let audios: Vec<_> = project
         .sequence
         .tracks
@@ -1159,16 +1197,17 @@ pub fn export_mp4_with_diagnostics(
     diagnostics::collect(diagnostics, || export_mp4(project, settings, cancel, progress))
 }
 
-fn record_encoder(encoder: &VideoEncoder) {
+fn record_encoder(encoder: &VideoEncoder, settings:&ExportSettings) {
     diagnostics::record(|d| {
         d.backend = Some(match encoder {
             VideoEncoder::Cpu => "libx264",
-            VideoEncoder::Nvenc => "h264_nvenc",
-            VideoEncoder::Qsv => "h264_qsv",
-            VideoEncoder::Amf(_) => "h264_amf",
-            VideoEncoder::VideoToolbox => "h264_videotoolbox",
-            VideoEncoder::Vaapi(_) => "h264_vaapi",
+            VideoEncoder::Nvenc => if settings.delivery==Delivery::Hevc{"hevc_nvenc"}else{"h264_nvenc"},
+            VideoEncoder::Qsv => if settings.delivery==Delivery::Hevc{"hevc_qsv"}else{"h264_qsv"},
+            VideoEncoder::Amf(_) => if settings.delivery==Delivery::Hevc{"hevc_amf"}else{"h264_amf"},
+            VideoEncoder::VideoToolbox => if settings.delivery==Delivery::Hevc{"hevc_videotoolbox"}else{"h264_videotoolbox"},
+            VideoEncoder::Vaapi(_) => if settings.delivery==Delivery::Hevc{"hevc_vaapi"}else{"h264_vaapi"},
         }.into());
+        if settings.delivery==Delivery::Hevc{if let Some(name)=&mut d.backend{*name=name.replace("libx264","libx265").replace("h264_","hevc_");}}
         d.device = match encoder {
             VideoEncoder::Vaapi(path) => Some(path.to_string_lossy().into_owned()),
             VideoEncoder::Amf(Some(index)) => Some(format!("D3D11 adapter {index}")),
@@ -1187,11 +1226,14 @@ fn export_mp4_inner(
     if cancel.load(Ordering::Relaxed) {
         return Err("Export cancelled".into());
     }
+    let working_project=if settings.burn_captions{std::borrow::Cow::Borrowed(project)}else{let mut p=project.clone();for c in std::iter::once(&mut p.sequence).chain(p.sequences.values_mut().map(|s|&mut s.sequence)).flat_map(|s|s.tracks.iter_mut()).flat_map(|t|&mut t.clips){if c.creative.text.as_ref().is_some_and(|t|t.style==crate::project::creative::TextStyle::Caption){c.opacity=0.;c.creative.animation.remove("opacity");}}std::borrow::Cow::Owned(p)};let project=&*working_project;
     send_progress(&progress, 0.0, "Checking export settings and source media".into());
     export_range(project, settings)?;
     if !settings.frame_rate.fps().is_finite() || settings.frame_rate.fps() <= 0.0 {
         return Err("Frame rate is invalid".into());
     }
+    if settings.delivery==Delivery::Wav{return export_wave(project,settings,cancel,&progress);}
+    if let Some(name)=&settings.backend{let prefix=if settings.delivery==Delivery::Hevc{"hevc_"}else{"h264_"};if !(name.starts_with(prefix)&&["nvenc","qsv","amf","vaapi","videotoolbox"].iter().any(|s|name==&format!("{prefix}{s}"))||name==if settings.delivery==Delivery::Hevc{"libx265"}else{"libx264"}){return Err("Choose an encoder compatible with the selected codec".into());}}
     diagnostics::measure(ExportStage::Preflight, || preflight_media(project, settings))?;
     let ffmpeg = export_ffmpeg()?;
     // Device probing and source inspection are independent subprocesses.
@@ -1269,7 +1311,7 @@ fn export_mp4_inner(
     let timeline_failed = std::cell::Cell::new(false);
     let source_failed = std::cell::Cell::new(false);
     let render = |encoder: &VideoEncoder| {
-        record_encoder(encoder);
+        record_encoder(encoder, &working_settings);
         if let Some(plan) = &direct {
             let try_hwaccel = gpu::resident_available(
                 &ffmpeg,
@@ -1293,7 +1335,7 @@ fn export_mp4_inner(
                 Err(error) if cancel.load(Ordering::Acquire) => Err(error),
                 Err(error) if try_hwaccel => {
                     diagnostics::record(|d| d.fallback_reasons.push(error.clone()));
-                    record_encoder(encoder);
+                    record_encoder(encoder, &working_settings);
                     gpu::resident_failed(&ffmpeg, plan, &working_settings);
                     let detail: String = error.chars().take(180).collect();
                     send_progress(
@@ -1328,7 +1370,7 @@ fn export_mp4_inner(
                         timeline_failed.set(true);
                         diagnostics::record(|d| d.fallback_reasons.push(format!("Timeline picture path: {error}")));
                         send_progress(&progress, 0.0, "Timeline picture path failed; retrying compositor".into());
-                        record_encoder(encoder);
+                        record_encoder(encoder, &working_settings);
                     }
                 }
             }
@@ -1358,7 +1400,7 @@ fn export_mp4_inner(
             return Err(error);
         }
         gpu::encoder_failed(&ffmpeg, settings);
-        if matches!(settings.encoder, EncoderPreference::Hardware | EncoderPreference::Amd(_)) {
+        if settings.backend.is_some() || matches!(settings.encoder, EncoderPreference::Hardware | EncoderPreference::Amd(_)) {
             return Err(format!(
                 "Required hardware encoding failed ({}); output was not replaced. {error}",
                 encoder.description()
@@ -1401,7 +1443,7 @@ fn export_composited(
 ) -> Result<(), String> {
     diagnostics::record(|d| {
         d.route = Some(ExportRoute::Composite);
-        d.picture_route = Some("cpu_composite_bounded_pipe".into());
+        d.picture_route = Some("composite_bounded_pipe".into());
         d.audio_route = Some("mixed".into());
     });
     if cancel.load(Ordering::Relaxed) {
@@ -1570,6 +1612,7 @@ fn export_composited(
                 let frame = frame_policy.frame(index);
                 let image = last_composite.get_or_render(frame, || {
                     let image = diagnostics::measure(ExportStage::Composition, || composite(project, frame, width, height, &mut source));
+                    diagnostics::record(|d|{let actual=crate::playback::picture_route();d.picture_route=Some(if d.picture_route.as_deref().is_some_and(|previous|previous.starts_with("mixed_")||(previous.starts_with("cpu_")&&actual.starts_with("gpu_"))||(previous.starts_with("gpu_")&&actual.starts_with("cpu_"))){"mixed_cpu_gpu_composite_bounded_pipe"}else{actual}.into());});
                     if let Some(error) = source.take_decode_error() {
                         source_failed.set(true);
                         return Err(format!("Could not render frame {frame}: {error}"));
@@ -1668,3 +1711,18 @@ fn thread_stderr(stderr: Option<std::process::ChildStderr>) -> std::thread::Join
     })
 }
 
+
+fn export_wave(project:&Project,settings:&ExportSettings,cancel:&AtomicBool,progress:&Sender<ExportProgress>)->Result<(),String>{
+ for media in &project.media{if settings.output==media.path||settings.output.canonicalize().ok().zip(media.path.canonicalize().ok()).is_some_and(|(a,b)|a==b){return Err("Audio export cannot replace source media".into());}}
+ let (start,end)=export_sequence_range(project,settings)?;let pcm=prepare_mixed_audio(project,start,end,cancel,progress)?;let mut input=File::open(&pcm.path).map_err(|e|e.to_string())?;let samples=input.metadata().map_err(|e|e.to_string())?.len()/4;let data=samples.checked_mul(2).filter(|n|*n<=u32::MAX as u64-36).ok_or("WAV exceeds the 4 GiB PCM limit; export a shorter range")?as u32;
+ let staged=StagedOutput::create(&settings.output)?;let mut out=File::create(&staged.path).map_err(|e|e.to_string())?;
+ out.write_all(b"RIFF").and_then(|_|out.write_all(&(data+36).to_le_bytes())).and_then(|_|out.write_all(b"WAVEfmt ")).and_then(|_|out.write_all(&16u32.to_le_bytes())).and_then(|_|out.write_all(&1u16.to_le_bytes())).and_then(|_|out.write_all(&2u16.to_le_bytes())).and_then(|_|out.write_all(&48000u32.to_le_bytes())).and_then(|_|out.write_all(&192000u32.to_le_bytes())).and_then(|_|out.write_all(&4u16.to_le_bytes())).and_then(|_|out.write_all(&16u16.to_le_bytes())).and_then(|_|out.write_all(b"data")).and_then(|_|out.write_all(&data.to_le_bytes())).map_err(|e|e.to_string())?;
+ let mut bytes=[0u8;65536];loop{if cancel.load(Ordering::Acquire){return Err("Export cancelled".into());}let n=std::io::Read::read(&mut input,&mut bytes).map_err(|e|e.to_string())?;if n==0{break;}if n%4!=0{return Err("Incomplete mixed audio sample".into());}let encoded:Vec<u8>=bytes[..n].chunks_exact(4).flat_map(|b|{let v=f32::from_le_bytes(b.try_into().unwrap());(((if v.is_finite(){v.clamp(-1.,1.)}else{0.})*32767.).round()as i16).to_le_bytes()}).collect();out.write_all(&encoded).map_err(|e|e.to_string())?;}
+ out.sync_all().map_err(|e|e.to_string())?;drop(out);staged.commit(&settings.output,cancel)?;let _=progress.send(ExportProgress{fraction:1.,preparation:None,message:format!("Wrote {} · WAV PCM 48 kHz stereo",settings.output.display()),remaining_seconds:None,done:true,error:None});Ok(())
+}
+
+pub(crate) fn normalization_gain(project:&Project,cancel:&AtomicBool)->Result<f32,String>{
+ let(tx,_)=std::sync::mpsc::channel();let end=project.sequence.duration_frames();let pcm=prepare_mixed_audio(project,0,end,cancel,&tx)?;let ffmpeg=export_ffmpeg()?;let child=ffmpeg_command(&ffmpeg).args(["-hide_banner","-v","info","-f","f32le","-ar","48000","-ac","2","-i"]).arg(&pcm.path).args(["-af","loudnorm=I=-16:TP=-1:LRA=11:print_format=json","-f","null","-"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e|e.to_string())?;
+ let mut owned=EncoderProcess{child,finished:false};let reader=thread_stderr(owned.child.stderr.take());let result=wait_for_encoder(&mut owned,cancel,Some(Duration::from_secs(1800)),None);let detail=reader.join().unwrap_or_default();result?;let begin=detail.rfind('{').ok_or("No loudness measurement returned")?;let end=detail.rfind('}').ok_or("Incomplete loudness measurement")?;let value:serde_json::Value=serde_json::from_str(&detail[begin..=end]).map_err(|e|e.to_string())?;
+ let parse=|k:&str|value[k].as_str().and_then(|s|s.parse::<f32>().ok()).filter(|v|v.is_finite());let loudness=parse("input_i").ok_or("This clip is silent or too short to measure loudness")?;let peak=parse("input_tp").ok_or("No true-peak measurement returned")?;let gain_db=(-16.-loudness).min(-1.-peak);Ok(10f32.powf(gain_db/20.))
+}

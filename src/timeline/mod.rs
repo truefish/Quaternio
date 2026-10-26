@@ -1,8 +1,8 @@
 mod layout;
 pub(crate) mod ops;
 
-pub use layout::{frame_at, hit_rows, layout_rows, layout_rows_with_density, hit_layout, snap_targets, Edge, Hit, TrackRow};
-pub use ops::{plan_placements, plan_placements_in_range, ClipCopy, Placement};
+pub use layout::{frame_at, layout_rows_with_density, hit_layout, snap_targets, Edge, Hit, TrackRow};
+pub use ops::{plan_placements_in_range, ClipCopy, Placement};
 
 // Retain snap ordering/tie behavior while rejecting unrepresentable distances.
 fn snap_delta(edges: &[i64], targets: &[i64], threshold: i64) -> i64 {
@@ -27,12 +27,15 @@ use ops::{
     unlink_clips, validate_unlocked };
 
 use crate::project::{
-    FrameRate, Project, ShortcutProfile, SourceRange, SourceTime, TrackKind, TransitionKind };
+    FrameRate, Project, ShortcutProfile, SourceRange, TrackKind, TransitionKind };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Tool {
     Select,
-    Razor }
+    Razor,
+    Slip,
+    Roll,
+    Slide }
 
 /// Read-only plan shared by Razor feedback and the committed single-clip cut.
 #[derive(Clone, Debug)]
@@ -52,6 +55,7 @@ pub struct GestureFeedback {
 
 #[derive(Clone, Debug)]
 enum Gesture {
+    Precision {ids:Vec<u64>,anchor:u64,grab:i64,mode:&'static str},
     Move {
         ids: Vec<u64>,
         anchor_id: u64,
@@ -167,6 +171,8 @@ impl Editor {
     /// marks belong to this editor. Collaborative undo is handled by compensation.
     pub fn apply_shared_project(&mut self, mut project: Project) {
         let same=self.project.document_id==project.document_id;
+        if same { let _=project.switch_sequence(&self.project.active_sequence); }
+        if same {project.sequence.targeting=self.project.sequence.targeting.clone();}
         let seconds=self.project.sequence.frame_rate.frame_to_seconds(self.project.sequence.playhead);
         project.shortcut_profile=self.project.shortcut_profile;
         project.sequence.playhead=project.sequence.frame_rate.seconds_to_frame(seconds).max(0);
@@ -335,6 +341,7 @@ impl Editor {
             .sequence
             .frame_rate
             .frame_to_seconds(self.project.sequence.playhead);
+        let targeting=self.project.all_sequences().map(|(id,s)|(id.to_owned(),s.targeting.clone())).collect::<std::collections::BTreeMap<_,_>>();
         let zoom = self.project.sequence.zoom;
         let scroll = self.project.sequence.scroll;
         self.redo.push(std::sync::Arc::new(self.project.clone()));
@@ -344,6 +351,7 @@ impl Editor {
             .sequence
             .frame_rate
             .seconds_to_frame(playhead_time);
+        if let Some(targeting) = targeting.get(&self.project.active_sequence) { self.project.sequence.targeting=targeting.clone(); }
         self.project.sequence.zoom = zoom;
         self.project.sequence.scroll = scroll;
         self.dirty = true;
@@ -361,6 +369,7 @@ impl Editor {
             .sequence
             .frame_rate
             .frame_to_seconds(self.project.sequence.playhead);
+        let targeting=self.project.all_sequences().map(|(id,s)|(id.to_owned(),s.targeting.clone())).collect::<std::collections::BTreeMap<_,_>>();
         let zoom = self.project.sequence.zoom;
         let scroll = self.project.sequence.scroll;
         self.undo.push(std::sync::Arc::new(self.project.clone()));
@@ -370,6 +379,7 @@ impl Editor {
             .sequence
             .frame_rate
             .seconds_to_frame(playhead_time);
+        if let Some(targeting) = targeting.get(&self.project.active_sequence) { self.project.sequence.targeting=targeting.clone(); }
         self.project.sequence.zoom = zoom;
         self.project.sequence.scroll = scroll;
         self.dirty = true;
@@ -377,6 +387,10 @@ impl Editor {
     }
 
     fn sanitize_selection(&mut self) {
+        let tracks = &self.project.sequence.tracks;
+        let targets = &mut self.project.sequence.targeting;
+        targets.video = targets.video.filter(|id| tracks.iter().any(|t| t.id == *id && t.kind == TrackKind::Video));
+        targets.audio = targets.audio.filter(|id| tracks.iter().any(|t| t.id == *id && t.kind == TrackKind::Audio));
         self.selected_clips
             .retain(|id| self.project.clip(*id).is_some());
         if self
@@ -419,26 +433,15 @@ impl Editor {
         })
     }
 
-    pub fn insert_media_at(&mut self, media: u64, at: i64, overwrite: bool) -> Result<(), String> {
-        let range = self
-            .project
-            .media(media)
-            .ok_or("Select a clip in the bin")?
-            .source_range()?;
-        self.insert_media_range_at(media, at, overwrite, range)
+
+    pub fn insert_media_on_track(&mut self,media:u64,at:i64,range:SourceRange,track:usize,format:Option<(u32,u32,FrameRate)>)->Result<(),String>{
+        let targeting=self.project.sequence.targeting.clone();
+        match self.project.sequence.tracks.get(track).ok_or("Destination track missing")?.kind{TrackKind::Video=>self.project.sequence.targeting.video=None,TrackKind::Audio=>self.project.sequence.targeting.audio=None}
+        self.selected_track=Some(track);
+        let result=self.insert_media_range_with_sequence_at(media,at,false,range,format);
+        self.project.sequence.targeting=targeting;result
     }
 
-    /// Commit exactly the range previewed at drag start, even if Source focus
-    /// or its live marks changed before release.
-    pub fn insert_media_range_at(
-        &mut self,
-        media: u64,
-        at: i64,
-        overwrite: bool,
-        range: SourceRange,
-    ) -> Result<(), String> {
-        self.insert_media_range_with_sequence_at(media, at, overwrite, range, None)
-    }
 
     /// Matching the first clip's format and inserting its marked range form
     /// one transaction, so failed placement and Undo also restore the format.
@@ -480,56 +483,6 @@ impl Editor {
         )
     }
 
-    pub fn set_source_marks(
-        &mut self,
-        media: u64,
-        source_in: Option<SourceTime>,
-        source_out: Option<SourceTime>,
-    ) -> Result<(), String> {
-        self.edit("source-mark", move |project| {
-            project
-                .media
-                .iter_mut()
-                .find(|item| item.id == media)
-                .ok_or("Select media in the Project panel")?
-                .set_source_marks(source_in, source_out)
-        })
-    }
-
-    pub fn mark_source_in(&mut self, media: u64, boundary: SourceTime) -> Result<(), String> {
-        self.edit("source-in", move |project| {
-            project
-                .media
-                .iter_mut()
-                .find(|item| item.id == media)
-                .ok_or("Select media in the Project panel")?
-                .mark_source_in(boundary)
-        })
-    }
-
-    /// `boundary` is exclusive; use Media::source_out_after_frame(cursor).
-    pub fn mark_source_out(&mut self, media: u64, boundary: SourceTime) -> Result<(), String> {
-        self.edit("source-out", move |project| {
-            project
-                .media
-                .iter_mut()
-                .find(|item| item.id == media)
-                .ok_or("Select media in the Project panel")?
-                .mark_source_out(boundary)
-        })
-    }
-
-    pub fn clear_source_marks(&mut self, media: u64) -> Result<(), String> {
-        self.edit("source-clear", move |project| {
-            project
-                .media
-                .iter_mut()
-                .find(|item| item.id == media)
-                .ok_or("Select media in the Project panel")?
-                .clear_source_marks();
-            Ok(())
-        })
-    }
 
     pub fn split_playhead(&mut self) -> Result<(), String> {
         let frame = self.project.sequence.playhead;
@@ -616,16 +569,6 @@ impl Editor {
         })
     }
 
-    pub fn apply_kind_to_selection(&mut self, kind: TransitionKind) -> Result<(), String> {
-        let clip_id = self
-            .selected_clips
-            .first()
-            .copied()
-            .ok_or("Select a clip")?;
-        self.edit("transition", move |project| {
-            add_transition(project, kind, clip_id).map(|_| ())
-        })
-    }
 
     pub fn set_selected_transition_duration(&mut self, frames: i64) {
         let Some(id) = self.selected_transition else {
@@ -840,6 +783,7 @@ impl Editor {
         validate_unlocked(&self.project, &ids)?;
         self.selected_clips = ids.clone();
         self.gesture_before = Some(self.project.clone());
+        if let Some(mode)=match self.tool{Tool::Slip=>Some("slip"),Tool::Roll=>Some("roll"),Tool::Slide=>Some("slide"),_=>None}{self.gesture=Some(Gesture::Precision{ids,anchor:anchor_id,grab:grab_frame,mode});self.coalesce=None;return Ok(());}
         self.gesture = Some(Gesture::Move {
             ids,
             anchor_id,
@@ -854,6 +798,10 @@ impl Editor {
         threshold: i64,
         target_track: Option<usize>,
     ) -> Result<(), String> {
+        if let Some(Gesture::Precision{ids,anchor,grab,mode})=self.gesture.clone(){
+            let before=self.gesture_before.as_ref().ok_or("Missing precision edit snapshot")?;let delta=frame.checked_sub(grab).ok_or("Edit exceeds the timeline")?;let mut next=before.clone();next.sequence.playhead=self.project.sequence.playhead;next.sequence.zoom=self.project.sequence.zoom;next.sequence.scroll=self.project.sequence.scroll;
+            let result=ops::precision(&mut next,&ids,mode,delta);self.gesture_feedback=Some(GestureFeedback{clip:anchor,edge:None,delta,duration:next.clip(anchor).map_or(0,|c|c.duration),snap:None,reason:result.as_ref().err().cloned()});result?;self.project=next;return Ok(());
+        }
         let Some(Gesture::Move {
             ids,
             anchor_id,
@@ -1104,6 +1052,7 @@ impl Editor {
             } else {
                 id
             };
+            let frame=project.sequence.playhead;
             let Some(clip) = project.clip_mut(target) else {
                 return Ok(());
             };
@@ -1144,6 +1093,14 @@ impl Editor {
                 "gain-g" => clip.grade.gain.g = value,
                 "gain-b" => clip.grade.gain.b = value,
                 _ => {}
+            }
+            if crate::project::creative::PROPERTIES.contains(&field.as_str()){
+                let local=frame-clip.timeline_start+clip.creative.offset;
+                if let Some(keys)=clip.creative.animation.get_mut(&field){
+                    let interpolation=keys.iter().rev().find(|k|k.frame<=local).map(|k|k.interpolation).unwrap_or_default();
+                    let key=crate::project::creative::Keyframe{frame:local,value,interpolation};
+                    match keys.binary_search_by_key(&local,|k|k.frame){Ok(i)=>keys[i]=key,Err(i)=>keys.insert(i,key)}
+                }
             }
             Ok(())
         });

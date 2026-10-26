@@ -59,6 +59,7 @@ impl Service{
 }
 impl Invite{
     pub fn path(&self)->String{format!("{}/v1/rooms/{}",self.url.trim_end_matches('/'),self.id)}
+    #[cfg(test)]
     pub fn fetch(&self)->Result<(String,RelaySettings),String>{let data=request(&self.path(),"GET",&self.token,None)?;let mut config=relay(&data["relay"],false)?;if let Some(token)=data["relay"]["tunnel_token"].as_str(){config.tunnel_url=self.url.clone();config.tunnel_token=token.into();}Ok((data["offer"].as_str().ok_or("Relay returned no invitation")?.into(),config))}
     pub fn fetch_state(&self)->Result<(String,RelaySettings,u64),String>{let data=request(&self.path(),"GET",&self.token,None)?;let mut config=relay(&data["relay"],false)?;if let Some(token)=data["relay"]["tunnel_token"].as_str(){config.tunnel_url=self.url.clone();config.tunnel_token=token.into();}Ok((data["offer"].as_str().ok_or("Missing reconnect offer")?.into(),config,data["generation"].as_u64().unwrap_or(0)))}
     pub fn answer(&self,code:String)->Result<(),String>{request(&format!("{}/answer",self.path()),"POST",&self.token,Some(json!({"answer":code,"generation":self.generation})))?;Ok(())}

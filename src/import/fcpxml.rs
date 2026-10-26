@@ -169,7 +169,7 @@ fn parse_fcpxml(text: &str, xml_dir: &Path, source_path: &Path) -> Result<(Proje
         if item.wants_video {
             if let Some(&track_index) = video_track_for_lane.get(&item.lane) {
                 let id = project.alloc();
-                project.sequence.tracks[track_index].clips.push(Clip {
+                project.sequence.tracks[track_index].clips.push(Clip { creative: Default::default(),
                     transform: Default::default(),
                     id,
                     media_id,
@@ -195,7 +195,7 @@ fn parse_fcpxml(text: &str, xml_dir: &Path, source_path: &Path) -> Result<(Proje
                 let key = (media_id, timeline_start);
                 if audio_start_used.insert(key, ()).is_none() {
                     let id = project.alloc();
-                    project.sequence.tracks[track_index].clips.push(Clip {
+                    project.sequence.tracks[track_index].clips.push(Clip { creative: Default::default(),
                         transform: Default::default(),
                         id,
                         media_id,
@@ -255,6 +255,7 @@ fn materialize_media(asset: &AssetInfo, report: &mut ImportReport) -> Media {
         MediaKind::Video
     };
     Media {
+        color: Default::default(),
         id: 0,
         name: asset.name.clone(),
         bin: String::new(),

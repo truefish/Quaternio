@@ -7,6 +7,7 @@ pub mod session;
 pub mod outbox;
 pub mod media;
 mod transfers;
+pub use transfers::{Progress as TransferProgress,Stage as TransferStage};
 
 use serde::{Deserialize, Serialize};
 

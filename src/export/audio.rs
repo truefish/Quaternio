@@ -6,7 +6,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use super::*;
 use crate::playback::{
-    mix_window_range, required_audio_windows, Pcm, PcmWindow, WindowBuffers, PREVIEW_WINDOW_SAMPLES };
+    mix_window_range_checked, required_audio_windows_checked, Pcm, PcmWindow, WindowBuffers, PREVIEW_WINDOW_SAMPLES };
 
 const FRAME_BYTES: u64 = 8; // Two little-endian f32 samples.
 const BLOCK_BYTES: u64 = PREVIEW_WINDOW_SAMPLES as u64 * FRAME_BYTES;
@@ -32,7 +32,7 @@ fn preparation(
 struct DiskAudio {
     // Close the handle before TemporaryAudioFile removes its path on Windows.
     file: File,
-    temporary: TemporaryAudioFile,
+    _temporary: TemporaryAudioFile,
     blocks: Vec<i64>,
     bytes: u64 }
 
@@ -41,7 +41,7 @@ impl DiskAudio {
         let (temporary, file) = TemporaryAudioFile::create()?;
         Ok(Self {
             file,
-            temporary,
+            _temporary: temporary,
             blocks,
             bytes: 0 })
     }
@@ -296,7 +296,7 @@ pub(super) fn prepare(
             return Err("Export cancelled".into());
         }
         let next = frame.saturating_add(chunk_frames).min(end);
-        for (id, block) in required_audio_windows(project, frame, next - frame) {
+        for (id, block) in required_audio_windows_checked(project, frame, next - frame, cancel)? {
             planned.entry(id).or_default().insert(block);
         }
         frame = next;
@@ -348,7 +348,7 @@ pub(super) fn prepare(
             return Err("Export cancelled".into());
         }
         let next = frame.saturating_add(chunk_frames).min(end);
-        let needed = required_audio_windows(project, frame, next - frame);
+        let needed = required_audio_windows_checked(project, frame, next - frame, cancel)?;
         retain_windows(&mut windows, &needed);
         for (id, block) in needed {
             if cancel.load(Ordering::Acquire) {
@@ -364,7 +364,7 @@ pub(super) fn prepare(
             let spool = spools.get_mut(&id).ok_or("Audio source was not prepared")?;
             windows.entry(id).or_default().push(spool.window(block)?);
         }
-        let samples = mix_window_range(project, frame, next - frame, &windows);
+        let samples = mix_window_range_checked(project, frame, next - frame, &windows, cancel)?;
         let expected = rounded_sample(next, rate)
             .and_then(|last| last.checked_sub(rounded_sample(frame, rate)?))
             .and_then(|frames| usize::try_from(frames).ok())

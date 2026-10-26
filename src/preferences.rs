@@ -30,6 +30,10 @@ impl Default for Layout {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    pub autosave: bool,
+    pub recent_projects: Vec<RecentProject>,
+    pub project_list_view: bool,
+    pub text_style:Option<crate::project::creative::TextContent>,
     pub export_format: Option<ExportFormat>,
     pub profile: String,
     pub keybindings: BTreeMap<String, String>,
@@ -45,7 +49,11 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            autosave: true,
+            recent_projects: Vec::new(),
+            project_list_view: false,
             export_format: None,
+            text_style:None,
             profile: "premiere".into(),
             keybindings: BTreeMap::new(),
             saved_layout: None,
@@ -59,9 +67,25 @@ impl Default for Preferences {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecentProject {
+    pub path: PathBuf,
+    pub name: String,
+    pub details: String,
+    pub opened: u64,
+    pub pinned: bool,
+}
+impl Default for RecentProject {
+    fn default() -> Self { Self { path: PathBuf::new(), name: String::new(), details: String::new(), opened: 0, pinned: false } }
+}
+
 /// Reusable encoding choices; destinations remain specific to each editing session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExportFormat {
+    #[serde(default)]pub container:i32,
+    #[serde(default)]pub codec:i32,
+    #[serde(default)]pub backend:String,
     pub width: u32,
     pub height: u32,
     pub frame_rate: crate::project::FrameRate,

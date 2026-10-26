@@ -1,4 +1,9 @@
 pub mod review;
+pub mod creative;
+pub mod captions;
+pub mod audio;
+pub mod sequences;
+pub mod portability;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -7,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-pub const PROJECT_VERSION: u32 = 5;
+pub const PROJECT_VERSION: u32 = 7;
 pub const STILL_DURATION_SECS: f64 = 5.0;
 
 /// An exclusively created sibling of the destination, never the last good save.
@@ -218,10 +223,6 @@ impl SourceTime {
         ((numerator + denominator - 1) / denominator).min(i64::MAX as i128) as i64
     }
 
-    /// Mark Out includes the displayed picture by using its following boundary.
-    pub fn following_boundary(self) -> Option<Self> {
-        Some(Self::new(self.frame.checked_add(1)?, self.rate))
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -299,15 +300,7 @@ pub struct SourcePlacementRange {
     pub source_time_offset: f64,
     pub duration: i64 }
 
-impl SourcePlacementRange {
-    pub fn duration_seconds(self, rate: FrameRate) -> f64 {
-        rate.frame_to_seconds(self.duration)
-    }
 
-    pub fn source_start_seconds(self, rate: FrameRate) -> f64 {
-        rate.frame_to_seconds(self.source_in) + self.source_time_offset
-    }
-}
 
 const FRAME_RATE_PRESETS: &[FrameRate] = &[
     FrameRate::rational(24000, 1001),
@@ -324,12 +317,6 @@ pub fn frame_rate_presets() -> &'static [FrameRate] {
     FRAME_RATE_PRESETS
 }
 
-pub fn frame_rate_from_label(label: &str) -> Option<FrameRate> {
-    frame_rate_presets()
-        .iter()
-        .copied()
-        .find(|rate| rate.label() == label)
-}
 
 #[derive(Clone, Copy, Debug)]
 pub struct SequencePreset {
@@ -486,6 +473,7 @@ pub fn parse_timecode(text: &str, rate: FrameRate) -> Option<i64> {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Media {
+    #[serde(default)] pub color: crate::color::management::Metadata,
     pub id: u64,
     pub name: String,
     #[serde(default)]
@@ -632,7 +620,7 @@ impl Media {
     }
 
     /// Accepts the exclusive boundary, not the displayed frame. Call
-    /// SourceTime::following_boundary() when marking the displayed picture.
+    /// the exclusive boundary following the displayed picture when marking Out.
     pub fn mark_source_out(&mut self, boundary: SourceTime) -> Result<(), String> {
         let source_in = self
             .source_in_mark
@@ -659,7 +647,7 @@ impl Media {
         // Duration is a sequence-frame count. Validate the final sample start,
         // allowing only the final frame's unsampled tail to cross media EOF.
         let last = clip.source_time_seconds(clip.duration - 1, rate);
-        last.is_finite() && last < self.source_duration_seconds()
+        start < self.source_duration_seconds() && last.is_finite() && last >= -1e-9 && last < self.source_duration_seconds()
     }
 
     pub fn timeline_frames(&self, rate: FrameRate) -> i64 {
@@ -681,6 +669,8 @@ impl Media {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
+    #[serde(default)]
+    pub creative: creative::Creative,
     pub id: u64,
     pub media_id: u64,
     pub name: String,
@@ -707,6 +697,8 @@ impl Clip {
     }
 
     pub fn source_time_seconds(&self, local_frames: i64, rate: FrameRate) -> f64 {
+        if self.creative.freeze { return self.creative.freeze_at.unwrap_or_else(||self.source_start_seconds(rate)); }
+        if self.creative.speed != 1. { return self.source_start_seconds(rate)+rate.frame_to_seconds(local_frames)*self.creative.speed; }
         match self.source_in.checked_add(local_frames) {
             Some(frame) => rate.frame_to_seconds(frame) + self.source_time_offset,
             None => self.source_start_seconds(rate) + rate.frame_to_seconds(local_frames) }
@@ -825,6 +817,8 @@ pub struct Transition {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Track {
+    #[serde(default)] pub role: audio::AudioRole,
+    #[serde(default)] pub sync_lock: bool,
     pub id: u64,
     pub kind: TrackKind,
     pub name: String,
@@ -844,6 +838,9 @@ fn default_track_gain() -> f32 {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sequence {
+    #[serde(default)] pub color: crate::color::management::Pipeline,
+    #[serde(default)] pub targeting: sequences::Targeting,
+    #[serde(default)]pub audio:audio::AudioFinish,
     pub name: String,
     pub width: u32,
     pub height: u32,
@@ -901,6 +898,10 @@ pub struct Project {
     #[serde(default)]
     pub shortcut_profile: ShortcutProfile,
     pub sequence: Sequence,
+    #[serde(default = "sequences::main_id")]
+    pub active_sequence: String,
+    #[serde(default)]
+    pub sequences: std::collections::BTreeMap<String, sequences::StoredSequence>,
     pub media: Vec<Media>,
     #[serde(default)]
     pub bins: Vec<String>,
@@ -925,7 +926,9 @@ impl Project {
             review_notes: Vec::new(),
             name: name.to_string(),
             shortcut_profile: ShortcutProfile::Premiere,
-            sequence: Sequence {
+            active_sequence: sequences::main_id(),
+            sequences: Default::default(),
+            sequence: Sequence {color:Default::default(),targeting:Default::default(),audio:Default::default(),
                 name: "Sequence 01".into(),
                 width: 1920,
                 height: 1080,
@@ -967,6 +970,8 @@ impl Project {
             TrackKind::Video => format!("V{count}"),
             TrackKind::Audio => format!("A{count}") };
         let track = Track {
+            role:Default::default(),
+            sync_lock:false,
             id: self.alloc(),
             kind,
             name,
@@ -1000,21 +1005,47 @@ impl Project {
             .media(id)
             .cloned()
             .ok_or("Select media in the Project panel")?;
-        for track in &self.sequence.tracks {
-            for clip in track.clips.iter().filter(|clip| clip.media_id == id) {
-                if track.kind == TrackKind::Video
-                    && !replacement.has_video
-                    && replacement.kind != MediaKind::Still
-                {
-                    return Err("Replacement has no picture for the existing video clips".into());
-                }
-                if track.kind == TrackKind::Audio && !replacement.has_audio {
-                    return Err("Replacement has no sound for the existing audio clips".into());
-                }
-                if !replacement.clip_source_is_valid(clip, self.sequence.frame_rate) {
-                    return Err(
-                        "Replacement is shorter than an existing clip's source range".into(),
-                    );
+        for (_, sequence) in self.all_sequences() {
+            for track in &sequence.tracks {
+                for clip in &track.clips {
+                    if clip.creative.text.is_some() || clip.creative.sequence.is_some() || clip.creative.adjustment { continue; }
+                    let mut spans = Vec::new();
+                    if let Some(multicam) = &clip.creative.multicam {
+                        let mut boundaries = vec![0, clip.duration];
+                        boundaries.extend(multicam.cuts.iter().map(|c| c.frame.saturating_sub(clip.creative.offset)).filter(|f| *f > 0 && *f < clip.duration));
+                        boundaries.sort_unstable();
+                        boundaries.dedup();
+                        for span in boundaries.windows(2) {
+                            if let Some(angle) = multicam.angle(span[0].saturating_add(clip.creative.offset)).filter(|a| a.media_id == id) {
+                                spans.push((span[0], span[1] - 1, angle.offset));
+                            }
+                        }
+                    } else if clip.media_id == id {
+                        if !replacement.clip_source_is_valid(clip, sequence.frame_rate) {
+                            return Err("Replacement is shorter than an existing clip's source range".into());
+                        }
+                        spans.push((0, clip.duration - 1, 0.));
+                    }
+                    if spans.is_empty() { continue; }
+                    if track.kind == TrackKind::Video && !replacement.has_video && replacement.kind != MediaKind::Still {
+                        return Err("Replacement has no picture for the existing video clips".into());
+                    }
+                    if track.kind == TrackKind::Audio && !replacement.has_audio {
+                        return Err("Replacement has no sound for the existing audio clips".into());
+                    }
+                    if replacement.kind != MediaKind::Still {
+                        for (first, last, offset) in spans {
+                            let a = clip.source_time_seconds(first, sequence.frame_rate) + offset;
+                            let b = clip.source_time_seconds(last, sequence.frame_rate) + offset;
+                            // Existing camera gaps remain silent/black. Preserve every available
+                            // source interval used by an angle, including inactive sequences.
+                            let low = a.min(b).max(0.);
+                            let high = a.max(b).min(original.source_duration_seconds() - 1e-9);
+                            if high >= low && high >= replacement.source_duration_seconds() {
+                                return Err("Replacement is shorter than an existing camera angle's source range".into());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1116,10 +1147,16 @@ impl Project {
                 clip.source_in = rate.seconds_to_frame(source_start).max(0);
                 clip.source_time_offset = source_start - rate.frame_to_seconds(clip.source_in);
                 clip.duration = (end - clip.timeline_start).max(1);
+                clip.creative.offset=map(clip.creative.offset);
+                for keys in clip.creative.animation.values_mut(){for key in keys.iter_mut(){key.frame=map(key.frame);}keys.dedup_by(|a,b|a.frame==b.frame);}
+                if let Some(multicam) = &mut clip.creative.multicam {
+                    for cut in &mut multicam.cuts { cut.frame = map(cut.frame); }
+                    multicam.cuts.dedup_by(|a, b| { if a.frame == b.frame { b.angle = a.angle; true } else { false } });
+                }
                 if let Some(media) = self.media.iter().find(|media| media.id == clip.media_id) {
-                    if media.kind != MediaKind::Still {
+                    if media.kind != MediaKind::Still && !clip.creative.freeze {
                         let remaining = media.source_duration_seconds() - source_start;
-                        let capacity = (remaining * rate.fps() - 1e-9).ceil().max(1.0) as i64;
+                        let capacity = if clip.creative.speed>0.{(remaining / clip.creative.speed * rate.fps() - 1e-9).ceil().max(1.)as i64}else{(source_start / clip.creative.speed.abs() * rate.fps()).floor()as i64+1};
                         clip.duration = clip.duration.min(capacity);
                     }
                 }
@@ -1155,7 +1192,9 @@ impl Project {
 
     pub fn load_from(path: &Path) -> Result<Self, String> {
         let text = fs::read_to_string(path).map_err(|err| err.to_string())?;
-        Self::from_json(&text)
+        let mut project=Self::from_json(&text)?;
+        if let Some(parent)=path.parent(){for m in &mut project.media{if m.path.is_relative(){m.path=parent.join(&m.path);}}}
+        Ok(project)
     }
 
     /// Check the version before decoding the body, including unknown future
@@ -1187,11 +1226,14 @@ impl Project {
     pub fn migrate(&mut self) -> Result<(), String> {
         Self::validate_version(self.version)?;
         review::validate_notes(&self.review_notes)?;
+        self.validate_sequences()?;
+        self.sequence.audio.validate()?;
         if uuid::Uuid::parse_str(&self.document_id).is_err() { return Err("Invalid project document identity".into()); }
         // v1 lacked Source marks and precise offsets; serde defaults retain its
         // full-source insertion and integer sequence-frame source origins.
         // v1/v2 lacked track Solo; serde defaults keep every audio track audible.
         // v1-v3 lack extended motion; identity defaults retain their pictures.
+        for clip in self.sequence.tracks.iter().flat_map(|t|&t.clips){clip.creative.validate()?;}
         self.version = PROJECT_VERSION;
         Ok(())
     }
@@ -1217,6 +1259,11 @@ impl Project {
             max_id = max_id.max(transition.id);
         }
         for note in &self.review_notes { max_id = max_id.max(note.id); }
+        for slot in self.sequences.values() {
+            for t in &slot.sequence.tracks { max_id=max_id.max(t.id); for c in &t.clips {max_id=max_id.max(c.id).max(c.link.unwrap_or(0));} }
+            for t in &slot.sequence.transitions {max_id=max_id.max(t.id);}
+            for n in &slot.notes {max_id=max_id.max(n.id);}
+        }
         self.next_id = self.next_id.max(max_id.saturating_add(1)).max(1);
         if !self
             .sequence

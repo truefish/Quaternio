@@ -40,9 +40,6 @@ fn visual_order(sequence: &Sequence) -> Vec<usize> {
     order
 }
 
-pub fn layout_tracks(sequence: &Sequence) -> Vec<TrackRow> {
-    layout_rows(sequence, 0.0)
-}
 
 /// Explicit lane sizes are local view preferences, never document edits.
 pub fn layout_rows_with_density(sequence: &Sequence, body: f32, density: i32) -> Vec<TrackRow> {
@@ -88,13 +85,6 @@ pub fn frame_at(x: f32, scroll: f32, px: f32) -> i64 {
     (scroll + x / px).floor() as i64
 }
 
-pub fn hit_test(sequence: &Sequence, x: f32, y: f32, px: f32, scroll: f32) -> Hit {
-    hit_rows(sequence, x, y, px, scroll, 0.0)
-}
-
-pub fn hit_rows(sequence: &Sequence, x: f32, y: f32, px: f32, scroll: f32, body: f32) -> Hit {
-    hit_layout(sequence, x, y, px, scroll, &layout_rows(sequence, body))
-}
 
 pub fn hit_layout(sequence: &Sequence, x: f32, y: f32, px: f32, scroll: f32, rows: &[TrackRow]) -> Hit {
     let px = px.max(0.05);
@@ -138,25 +128,6 @@ pub fn hit_layout(sequence: &Sequence, x: f32, y: f32, px: f32, scroll: f32, row
     Hit::Empty { frame }
 }
 
-pub fn snap_delta(edges: &[i64], targets: &[i64], threshold: i64) -> i64 {
-    if threshold < 0 {
-        return 0;
-    }
-    let mut best: Option<i64> = None;
-    for edge in edges {
-        for target in targets {
-            let delta = target - edge;
-            if delta.abs() <= threshold
-                && best
-                    .map(|current| delta.abs() < current.abs())
-                    .unwrap_or(true)
-            {
-                best = Some(delta);
-            }
-        }
-    }
-    best.unwrap_or(0)
-}
 
 
 

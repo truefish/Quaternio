@@ -23,6 +23,11 @@ macro_rules! actions {
 }
 
 actions![
+    ("project-manager", "File: Project manager", "", "shift+1", Always),
+    ("autosave-toggle", "Settings: Toggle autosave", "", "", Always),
+    ("creator", "Create: Titles, captions and animation", "", "", Always),
+    ("creator-title", "Create: Title", "", "", Always),
+    ("creator-captions-import", "Captions: Import SRT or WebVTT", "", "", Always),
     ("session", "Collaboration: Live peer session", "", "", Always),
     ("track-density:0", "Timeline: Automatic track height", "", "", Always),
     ("track-density:1", "Timeline: Compact tracks", "", "", Always),

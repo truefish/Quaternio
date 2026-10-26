@@ -20,11 +20,13 @@ mod shortcuts;
 mod source;
 mod timeline;
 mod transitions;
+mod transcription;
 mod update;
 
 mod app;
 
 fn main() {
+    match transcription::run_if_requested(){Ok(true)=>return,Ok(false)=>{},Err(error)=>{eprintln!("Transcription: {error}");std::process::exit(1);}}
     match media_engine::run_if_requested() {
         Ok(true) => return,
         Ok(false) => {},

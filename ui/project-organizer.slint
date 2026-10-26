@@ -1,24 +1,35 @@
+import { Palette, UiMetrics, KeyboardControls } from "style.slint";
 import { LiveFocus, LiveTouchArea } from "live-focus.slint";
 component OrganizerButton inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
     callback clicked();
-    height: 26px;
-    border-radius: 4px;
+    accessible-role: button; accessible-label: root.label; accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+    forward-focus: button-focus;
+    button-focus := FocusScope {
+        enabled: root.enabled && !KeyboardControls.blocked;
+        changed has-focus => { if (self.has-focus) { KeyboardControls.navigating = true; } }
+        key-pressed(event) => { if (event.text == Key.Return || event.text == " ") { return accept; } return reject; }
+        key-released(event) => { if (event.text == Key.Return || event.text == " ") { if (root.enabled && !KeyboardControls.blocked) { root.clicked(); } return accept; } return reject; }
+    }
+    height: UiMetrics.control-height;
+    border-radius: UiMetrics.radius;
     border-width: 1px;
-    border-color: #363636;
-    background: !root.enabled ? #202020 : touch.pressed ? #303030 : touch.has-hover ? #363636 : #272727;
+    border-color: button-focus.has-focus ? Palette.accent : Palette.bg3;
+    background: !root.enabled ? Palette.bg2 : touch.pressed ? Palette.row-pressed : touch.has-hover ? Palette.bg3 : Palette.bg2;
     Text {
         text: root.label;
-        color: root.enabled ? #F0F3F7 : #747474;
-        font-size: 11px;
+        width: 100%; height: 100%;
+        color: root.enabled ? Palette.text-primary : Palette.text-disabled;
+        font-size: UiMetrics.control-font;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
     touch := LiveTouchArea {
         enabled: root.enabled;
         mouse-cursor: pointer;
-        clicked => { root.clicked(); }
+        clicked => { button-focus.focus(); root.clicked(); }
     }
 }
 
@@ -35,17 +46,20 @@ export component ProjectOrganizer inherits Rectangle {
     private property <bool> moving: false;
     private property <int> highlighted: 0;
     private property <string> new-name: "";
-    height: 30px;
+    height: 32px;
     min-width: 200px;
 
     forward-focus: organizer-focus;
     property <bool> bins-opening: false;
+    property <length> anchor-x: filter-touch.absolute-position.x;
+    property <length> anchor-y: filter-touch.absolute-position.y;
     organizer-focus := FocusScope {
+        changed has-focus => { if (self.has-focus) { KeyboardControls.navigating = true; } }
         key-pressed(event) => {
             if (event.text == Key.Return || event.text == " " || event.text == Key.DownArrow) {
                 root.moving = false;
                 root.highlighted = max(0, min(root.bins.length, root.highlighted));
-                new-bin-menu.close(); root.bins-opening = true; bins-menu.show();
+                root.anchor-x = filter-touch.absolute-position.x; root.anchor-y = filter-touch.absolute-position.y; new-bin-menu.close(); root.bins-opening = true; bins-menu.show();
                 return accept;
             }
             return reject;
@@ -74,21 +88,21 @@ export component ProjectOrganizer inherits Rectangle {
     HorizontalLayout {
         padding-top: 2px;
         padding-bottom: 2px;
-        spacing: 5px;
+        spacing: UiMetrics.space-xs;
         Rectangle {
             min-width: 70px;
             horizontal-stretch: 1;
-            border-radius: 4px;
+            border-radius: UiMetrics.radius;
             border-width: 1px;
-            border-color: #363636;
-            background: filter-touch.has-hover ? #272727 : #181818;
+            border-color: Palette.bg3;
+            background: filter-touch.has-hover ? Palette.bg2 : Palette.bg0;
             Text {
                 x: 8px;
-                width: parent.width - 28px;
+                width: parent.width - UiMetrics.control-height;
                 height: 100%;
                 text: root.current-bin == "" ? "All media" : root.current-bin;
-                color: #F0F3F7;
-                font-size: 11px;
+                color: Palette.text-primary;
+                font-size: UiMetrics.control-font;
                 vertical-alignment: center;
                 overflow: elide;
             }
@@ -98,12 +112,13 @@ export component ProjectOrganizer inherits Rectangle {
                 width: 16px;
                 height: 16px;
                 source: @image-url("icons/chevron-down.svg");
-                colorize: #ABABAB;
+                colorize: Palette.text-secondary;
                 image-fit: contain;
             }
             filter-touch := LiveTouchArea {
                 mouse-cursor: pointer;
                 clicked => {
+                    root.anchor-x = filter-touch.absolute-position.x; root.anchor-y = filter-touch.absolute-position.y;
                     root.moving = false;
                     root.highlighted = max(0, min(root.bins.length, root.highlighted));
                     new-bin-menu.close();
@@ -111,30 +126,31 @@ export component ProjectOrganizer inherits Rectangle {
                 }
             }
         }
-        OrganizerButton {
-            width: 66px;
+        move-button := OrganizerButton {
+            width: 82px;
             label: "Move to…";
             enabled: root.selected-media;
             clicked => {
+                root.anchor-x = move-button.absolute-position.x; root.anchor-y = move-button.absolute-position.y;
                 root.moving = true;
                 root.highlighted = max(0, min(root.bins.length, root.highlighted));
                 new-bin-menu.close();
                 root.bins-opening = true; bins-menu.show();
             }
         }
-        OrganizerButton {
-            width: 57px;
+        new-button := OrganizerButton {
+            width: 60px;
             label: "+ Bin";
-            clicked => { bins-menu.close(); new-bin-menu.show(); }
+            clicked => { root.anchor-x = new-button.absolute-position.x; root.anchor-y = new-button.absolute-position.y; bins-menu.close(); new-bin-menu.show(); }
         }
     }
 
     bins-menu := PopupWindow {
-        x: max(8px - filter-touch.absolute-position.x, min(0px, root.window-width - filter-touch.absolute-position.x - self.width - 8px));
-        y: filter-touch.absolute-position.y + root.height + self.height + 3px <= root.window-height - 8px ? root.height + 3px : max(8px - filter-touch.absolute-position.y, -self.height - 3px);
+        x: max(8px - root.absolute-position.x, min(root.anchor-x - root.absolute-position.x, root.window-width - root.absolute-position.x - self.width - 8px));
+        y: root.anchor-y + UiMetrics.control-height + self.height + 4px <= root.window-height - 8px ? root.anchor-y - root.absolute-position.y + UiMetrics.control-height + 4px : max(8px - root.absolute-position.y, root.anchor-y - root.absolute-position.y - self.height - 4px);
         width: min(max(root.width, 240px), root.window-width - 16px);
-        height: min(min(252px, root.window-height - 24px), (root.bins.length + 1) * 28px + 8px);
-        close-on-click: true;
+        height: min(min(252px, root.window-height - 24px), (root.bins.length + 1) * UiMetrics.control-height + 8px);
+        close-policy: close-on-click;
         forward-focus: menu-focus;
         Timer {
             interval: 1ms;
@@ -152,7 +168,7 @@ export component ProjectOrganizer inherits Rectangle {
             }
 
     function reveal-bin() {
-        bin-scroll.viewport-y = -max(0px, min(max(0px, bin-scroll.viewport-height - bin-scroll.height), max(root.highlighted * 28px + 28px - bin-scroll.height, min(-bin-scroll.viewport-y, root.highlighted * 28px))));
+        bin-scroll.content-y = -max(0px, min(max(0px, bin-scroll.content-height - bin-scroll.height), max(root.highlighted * UiMetrics.control-height + UiMetrics.control-height - bin-scroll.height, min(-bin-scroll.content-y, root.highlighted * UiMetrics.control-height))));
     }
 
             key-pressed(event) => {
@@ -163,31 +179,31 @@ export component ProjectOrganizer inherits Rectangle {
                 return accept;
             }
             Rectangle {
-                background: #272727;
+                background: Palette.bg2;
                 border-width: 1px;
-                border-color: #454545;
-                border-radius: 4px;
+                border-color: Palette.bg3;
+                border-radius: UiMetrics.radius;
                 bin-scroll := Flickable {
                     x: 4px;
                     y: 4px;
                     width: parent.width - 8px;
                     height: parent.height - 8px;
-                    viewport-height: (root.bins.length + 1) * 28px;
-                    viewport-width: self.width;
-                    viewport-y: 0px;
+                    content-height: (root.bins.length + 1) * UiMetrics.control-height;
+                    content-width: self.width;
+                    content-y: 0px;
                     interactive: true;
                     VerticalLayout {
                         spacing: 0px;
                         Rectangle {
-                            height: 28px;
+                            height: UiMetrics.control-height;
                             border-radius: 3px;
-                            background: root.highlighted == 0 || all-touch.has-hover ? #20354A : transparent;
+                            background: root.highlighted == 0 || all-touch.has-hover ? Palette.accent-muted : transparent;
                             Text {
                                 x: 8px;
                                 width: parent.width - 16px;
                                 height: 100%;
                                 text: root.moving ? "Unsorted" : "All media";
-                                color: root.current-bin == "" ? #5AB2F3 : #F0F3F7;
+                                color: root.current-bin == "" ? Palette.accent : Palette.text-primary;
                                 font-size: 12px;
                                 vertical-alignment: center;
                             }
@@ -197,15 +213,15 @@ export component ProjectOrganizer inherits Rectangle {
                             }
                         }
                         for bin[index] in root.bins: Rectangle {
-                            height: 28px;
+                            height: UiMetrics.control-height;
                             border-radius: 3px;
-                            background: root.highlighted == index + 1 || bin-touch.has-hover ? #20354A : transparent;
+                            background: root.highlighted == index + 1 || bin-touch.has-hover ? Palette.accent-muted : transparent;
                             Text {
                                 x: 8px;
                                 width: parent.width - 16px;
                                 height: 100%;
                                 text: bin;
-                                color: root.current-bin == bin ? #5AB2F3 : #F0F3F7;
+                                color: root.current-bin == bin ? Palette.accent : Palette.text-primary;
                                 font-size: 12px;
                                 vertical-alignment: center;
                                 overflow: elide;
@@ -222,11 +238,11 @@ export component ProjectOrganizer inherits Rectangle {
     }
 
     new-bin-menu := PopupWindow {
-        x: max(8px - filter-touch.absolute-position.x, min(0px, root.window-width - filter-touch.absolute-position.x - self.width - 8px));
-        y: filter-touch.absolute-position.y + root.height + self.height + 3px <= root.window-height - 8px ? root.height + 3px : max(8px - filter-touch.absolute-position.y, -self.height - 3px);
+        x: max(8px - root.absolute-position.x, min(root.anchor-x - root.absolute-position.x, root.window-width - root.absolute-position.x - self.width - 8px));
+        y: root.anchor-y + UiMetrics.control-height + self.height + 4px <= root.window-height - 8px ? root.anchor-y - root.absolute-position.y + UiMetrics.control-height + 4px : max(8px - root.absolute-position.y, root.anchor-y - root.absolute-position.y - self.height - 4px);
         width: min(max(root.width, 270px), root.window-width - 16px);
-        height: 92px;
-        close-on-click: false;
+        height: 124px;
+        close-policy: no-auto-close;
         forward-focus: new-name-input;
         Timer {
             interval: 1ms;
@@ -238,37 +254,37 @@ export component ProjectOrganizer inherits Rectangle {
                 return reject;
             }
         Rectangle {
-            background: #272727;
+            background: Palette.bg2;
             border-width: 1px;
-            border-color: #454545;
-            border-radius: 4px;
+            border-color: Palette.bg3;
+            border-radius: UiMetrics.radius;
             VerticalLayout {
                 padding: 10px;
-                spacing: 7px;
+                spacing: UiMetrics.space-sm;
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: UiMetrics.space-sm;
                     Text {
                         text: "New bin · use / for a folder path";
-                        color: #ABABAB;
-                        font-size: 11px;
+                        color: Palette.text-secondary;
+                        font-size: UiMetrics.control-font;
                         horizontal-stretch: 1;
                         overflow: elide;
                     }
                     OrganizerButton {
-                        width: 20px;
-                        height: 18px;
+                        width: UiMetrics.control-height;
+                        height: UiMetrics.control-height;
                         label: "×";
                         clicked => { new-bin-menu.close(); }
                     }
                 }
                 HorizontalLayout {
-                    spacing: 6px;
+                    spacing: UiMetrics.space-sm;
                     Rectangle {
                         horizontal-stretch: 1;
                         border-width: 1px;
-                        border-color: new-name-input.has-focus ? #5AB2F3 : #363636;
-                        border-radius: 4px;
-                        background: #181818;
+                        border-color: new-name-input.has-focus ? Palette.accent : Palette.bg3;
+                        border-radius: UiMetrics.radius;
+                        background: Palette.bg0;
                         new-name-input := TextInput {
                 Timer { interval: 150ms; running: new-name-input.has-focus; triggered => { LiveFocus.heartbeat(); } }
                 property <bool> live-focus-counted: false;
@@ -277,7 +293,7 @@ export component ProjectOrganizer inherits Rectangle {
                             width: parent.width - 14px;
                             height: 100%;
                             text <=> root.new-name;
-                            color: #F0F3F7;
+                            color: Palette.text-primary;
                             font-size: 12px;
                             vertical-alignment: center;
                             single-line: true;
@@ -285,7 +301,7 @@ export component ProjectOrganizer inherits Rectangle {
                         }
                     }
                     OrganizerButton {
-                        width: 58px;
+                        width: 70px;
                         label: "Create";
                         enabled: root.new-name != "";
                         clicked => { root.submit-new-bin(); }
@@ -293,7 +309,7 @@ export component ProjectOrganizer inherits Rectangle {
                 }
                 Text {
                     text: "Esc cancels";
-                    color: #ABABAB;
+                    color: Palette.text-secondary;
                     font-size: 10px;
                 }
             }

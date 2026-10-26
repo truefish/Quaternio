@@ -51,20 +51,7 @@ pub fn set_busy(busy: bool) {
         service.state.1.notify_one();
     }
 }
-/// Queue an immutable prepared segment while its producing worker is idle.
-/// False means no viewer owns the service yet; callers may retry later.
-/// This performs only a fingerprint check and bounded enqueue, never a scan.
-pub fn prepare_index(path: &Path, fps: f64) -> bool {
-    let service = SHARED
-        .get()
-        .and_then(|shared| shared.lock().ok()?.upgrade());
-    if let Some(service) = service {
-        service.eligible(path, fps);
-        true
-    } else {
-        false
-    }
-}
+
 
 impl Eligibility {
     /// Run on the preparation worker only. The sole timing worker performs the

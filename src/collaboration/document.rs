@@ -19,9 +19,11 @@ fn insert_object(out: &mut Document, prefix: &str, value: impl Serialize) {
     flatten(prefix, serde_json::to_value(value).expect("serializable document"), out);
 }
 pub fn capture(project: &Project) -> Document {
+    let canonical=if project.active_sequence=="main"{std::borrow::Cow::Borrowed(project)}else{let mut p=project.clone();let _=p.switch_sequence("main");std::borrow::Cow::Owned(p)};
+    let project=&*canonical;
     let mut out = Document::new();
     insert_object(&mut out,"document",json!({"version":PROJECT_VERSION,"document_id":project.document_id,"name":project.name,
-        "sequence_name":project.sequence.name,"width":project.sequence.width,"height":project.sequence.height,"frame_rate":project.sequence.frame_rate,"bins":project.bins}));
+        "sequence_name":project.sequence.name,"color":project.sequence.color,"audio":project.sequence.audio,"width":project.sequence.width,"height":project.sequence.height,"frame_rate":project.sequence.frame_rate,"bins":project.bins}));
     out.insert("order".into(),json!(project.sequence.tracks.iter().map(|t|t.id).collect::<Vec<_>>()));
     for track in &project.sequence.tracks {
         let mut value = serde_json::to_value(track).unwrap(); value.as_object_mut().unwrap().remove("clips");
@@ -37,6 +39,12 @@ pub fn capture(project: &Project) -> Document {
     }
     for transition in &project.sequence.transitions { insert_object(&mut out,&format!("transition/{}",transition.id),transition); }
     for note in &project.review_notes { insert_object(&mut out,&format!("note/{}",note.id),note); }
+    for (id,slot) in &project.sequences {
+        let mut slot=slot.clone();slot.sequence.playhead=0;slot.sequence.in_point=None;slot.sequence.out_point=None;
+        slot.sequence.zoom=8.;slot.sequence.scroll=0.;slot.sequence.snap=true;
+        slot.sequence.targeting=Default::default();
+        insert_object(&mut out,&format!("sequences/{id}"),slot);
+    }
     out
 }
 fn unflatten(doc: &Document) -> Result<Value,String> {
@@ -73,13 +81,20 @@ pub fn materialize(doc: &Document) -> Result<Project,String> {
     if !clips.is_empty() || value["track"].as_object().is_some_and(|t|t.values().any(|v|!v.is_null())) { return Err("An object refers to a missing track".into()); }
     let array = |key:&str| value[key].as_object().map(|v|v.values().cloned().collect::<Vec<_>>()).unwrap_or_default();
     let mut project:Project = serde_json::from_value(json!({"version":metadata["version"],"document_id":metadata["document_id"],"name":metadata["name"],
-        "sequence":{"name":metadata["sequence_name"],"width":metadata["width"],"height":metadata["height"],"frame_rate":metadata["frame_rate"],"tracks":tracks,"transitions":array("transition"),"playhead":0,"in_point":null,"out_point":null},
-        "media":array("media"),"review_notes":array("note"),"bins":metadata["bins"],"next_id":1})).map_err(|e|format!("Invalid shared document: {e}"))?;
+        "sequence":{"color":metadata.get("color").cloned().unwrap_or_else(||json!(crate::color::management::Pipeline::default())),"audio":metadata.get("audio").cloned().unwrap_or_else(||json!(crate::project::audio::AudioFinish::default())),"name":metadata["sequence_name"],"width":metadata["width"],"height":metadata["height"],"frame_rate":metadata["frame_rate"],"tracks":tracks,"transitions":array("transition"),"playhead":0,"in_point":null,"out_point":null},
+        "media":array("media"),"review_notes":array("note"),"sequences":value.get("sequences").cloned().unwrap_or_else(||json!({})),"bins":metadata["bins"],"next_id":1})).map_err(|e|format!("Invalid shared document: {e}"))?;
     project.migrate()?;
     validate(&project)?;
     project.ensure_integrity();
     // Canonical round trip rejects unknown fields and inconsistent entity keys.
-    let canonical=capture(&project);
+    let mut canonical=capture(&project);
+    // Old append-only logs must replay their original property vocabulary.
+    // Only newly introduced, absent fields may use migration defaults.
+    if metadata["version"].as_u64().is_some_and(|v|v>0&&v<7){
+        canonical.insert("document/version".into(),metadata["version"].clone());
+        let version=metadata["version"].as_u64().unwrap();
+        canonical.retain(|key,_|doc.contains_key(key)||!((version<6&&(key.starts_with("document/audio/")||key.starts_with("clip/")&&key.contains("/creative/"))) || (version<7&&((key.starts_with("clip/")&&["/creative/sequence","/creative/adjustment","/creative/dialogue","/creative/multicam","/creative/input_color"].iter().any(|f|key.ends_with(f)))||key.starts_with("track/")&&(key.ends_with("/role")||key.ends_with("/sync_lock"))||key=="document/audio/ducking"||key.starts_with("document/color/")||key.starts_with("media/")&&key.contains("/color/")||key.starts_with("clip/")&&key.ends_with("/creative/lut")))));
+    }
     if canonical!=*doc {
         let mismatch=canonical.keys().chain(doc.keys()).find(|k|canonical.get(*k)!=doc.get(*k)).map(|k|k.as_str()).unwrap_or("unknown");
         return Err(format!("Shared document has an invalid property at {mismatch}"));
@@ -90,19 +105,20 @@ fn validate(p:&Project)->Result<(),String> {
     if p.name.chars().count()>1024 || p.sequence.name.chars().count()>1024 || p.media.len()>100_000 || p.review_notes.len()>10_000 || p.sequence.width==0 || p.sequence.height==0 || p.sequence.width>16384 || p.sequence.height>16384
         || p.sequence.frame_rate.num==0 || p.sequence.frame_rate.den==0 || !(0.1..=1000.0).contains(&p.sequence.frame_rate.fps()) { return Err("Invalid shared document bounds".into()); }
     let mut ids=BTreeSet::new();
-    for id in p.media.iter().map(|m|m.id).chain(p.sequence.tracks.iter().map(|t|t.id)).chain(p.sequence.tracks.iter().flat_map(|t|t.clips.iter().map(|c|c.id)))
-        .chain(p.sequence.transitions.iter().map(|t|t.id)).chain(p.review_notes.iter().map(|n|n.id)) {
+    for id in p.media.iter().map(|m|m.id).chain(p.all_sequences().flat_map(|(_,s)|s.tracks.iter().map(|t|t.id).chain(s.tracks.iter().flat_map(|t|t.clips.iter().map(|c|c.id))).chain(s.transitions.iter().map(|t|t.id))))
+        .chain(p.review_notes.iter().map(|n|n.id)).chain(p.sequences.values().flat_map(|s|s.notes.iter().map(|n|n.id))) {
         if id==0 || id>=i32::MAX as u64 || !ids.insert(id) { return Err("Duplicate or unsupported object identity".into()); }
     }
-    for track in &p.sequence.tracks {
+    for track in p.all_sequences().flat_map(|(_,s)|&s.tracks) {
         if track.name.chars().count()>1024 { return Err("Track name exceeds 1,024 characters".into()); }
         let mut clips:Vec<_>=track.clips.iter().collect(); clips.sort_by_key(|c|c.timeline_start);
         let mut end=0;
         for c in clips {
             if c.name.chars().count()>1024 || c.timeline_start<end || c.timeline_start>1_000_000_000 || c.duration>1_000_000_000 || c.duration<=0 || c.timeline_start.checked_add(c.duration).is_none()
-                || c.source_in<0 || !c.source_time_offset.is_finite() || p.media(c.media_id).is_none() {
+                || c.source_in<0 || !c.source_time_offset.is_finite() || (p.media(c.media_id).is_none()&&c.creative.text.is_none()&&c.creative.sequence.is_none()&&!c.creative.adjustment) {
                 return Err("Edit would create an invalid or overlapping clip range".into());
             }
+            c.creative.validate()?;
             end=c.end();
             let mut sanitized=c.transform; sanitized.sanitize();
             if sanitized!=c.transform || !c.volume.is_finite() || !(0.0..=4.0).contains(&c.volume)
@@ -228,9 +244,13 @@ impl Authority {
             }
         }
         let candidate_project=materialize(&candidate)?;
+        if undoes.is_none() {
+            let previous=project.all_object_ids();
+            if candidate_project.all_object_ids().difference(&previous).any(|id|*id<member.first||*id>=member.limit){return Err("New object is outside this participant's ID range".into());}
+        }
         // Locking a destination track also protects new inserts and cross-track moves.
-        for track in &project.sequence.tracks {
-            if track.locked && candidate_project.sequence.tracks.iter().find(|t|t.id==track.id).map(|t|&t.clips)!=Some(&track.clips) {return Err("Edit would change a locked track".into());}
+        for track in project.all_sequences().flat_map(|(_,s)|&s.tracks) {
+            if track.locked && candidate_project.all_sequences().flat_map(|(_,s)|&s.tracks).find(|t|t.id==track.id).map(|t|&t.clips)!=Some(&track.clips) {return Err("Edit would change a locked track".into());}
         }
         let revision=self.revision+1;
         for key in keys {self.versions.insert(key.clone(),(revision,patch.id.clone()));self.sources.insert(key.clone(),revision);}

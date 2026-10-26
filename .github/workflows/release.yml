@@ -38,14 +38,16 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install NSIS
-        run: choco install nsis -y --no-progress
+      - name: Install native build tools
+        run: choco install nsis llvm -y --no-progress
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Build release
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: cargo build --release --locked
 
       - name: Stage and package
@@ -55,10 +57,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path packaging/stage, dist | Out-Null
           Copy-Item target/release/quaternio.exe packaging/stage/quaternio.exe
           Copy-Item LICENSE packaging/stage/LICENSE
+          Copy-Item packaging/licenses/whisper-MIT.txt packaging/stage/whisper-MIT.txt
+          Copy-Item ui/fonts/LICENSE.txt packaging/stage/Inter-OFL.txt
 
           $portable = "dist/Quaternio-Windows-Portable-$tag.zip"
           if (Test-Path $portable) { Remove-Item $portable }
-          Compress-Archive -Path packaging/stage/* -DestinationPath $portable
+          python -c "import pathlib,zipfile,sys; stage=pathlib.Path('packaging/stage'); z=zipfile.ZipFile(sys.argv[1],'w',zipfile.ZIP_DEFLATED,compresslevel=9); [z.write(p,p.name) for p in sorted(stage.iterdir()) if p.is_file()]; z.close()" $portable
 
           $makensis = @(
             "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
@@ -93,7 +97,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
+            build-essential pkg-config cmake libclang-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
             libfontconfig-dev libx11-xcb-dev libxcursor-dev \
             libxkbcommon-x11-dev libx11-dev libwayland-dev \
@@ -117,8 +121,10 @@ jobs:
           mkdir -p "$STAGE" dist
           cp target/release/quaternio "$STAGE/quaternio"
           cp LICENSE "$STAGE/LICENSE"
+          cp packaging/licenses/whisper-MIT.txt "$STAGE/whisper-MIT.txt"
+          cp ui/fonts/LICENSE.txt "$STAGE/Inter-OFL.txt"
           chmod +x "$STAGE/quaternio"
-          tar -czf "dist/${NAME}.tar.gz" -C packaging/stage "$NAME"
+          tar -cf - -C packaging/stage "$NAME" | gzip -9 > "dist/${NAME}.tar.gz"
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
@@ -149,6 +155,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install native build tools
+        run: |
+          brew install cmake llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
       - name: Build release
         run: cargo build --release --locked
 
@@ -161,9 +172,11 @@ jobs:
           mkdir -p "$STAGE" dist
           cp target/release/quaternio "$STAGE/quaternio"
           cp LICENSE "$STAGE/LICENSE"
+          cp packaging/licenses/whisper-MIT.txt "$STAGE/whisper-MIT.txt"
+          cp ui/fonts/LICENSE.txt "$STAGE/Inter-OFL.txt"
           chmod +x "$STAGE/quaternio"
           codesign -s - "$STAGE/quaternio" || true
-          tar -czf "dist/${NAME}.tar.gz" -C packaging/stage "$NAME"
+          tar -cf - -C packaging/stage "$NAME" | gzip -9 > "dist/${NAME}.tar.gz"
           echo "Packed ${NAME}.tar.gz (uname -m = ${ARCH})"
 
       - name: Upload macOS artifact
@@ -200,6 +213,18 @@ jobs:
             echo "Expected 5 release files, found ${COUNT}" >&2
             exit 1
           fi
+
+      - name: Report release download sizes
+        run: |
+          python3 - <<'PY'
+          import os, pathlib
+          rows = ["## Release download sizes", "", "| Artifact | Bytes | MiB |", "|---|---:|---:|"]
+          for item in sorted(pathlib.Path("release").iterdir()):
+              size = item.stat().st_size
+              rows.append(f"| {item.name} | {size:,} | {size / 1048576:.2f} |")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write("\n".join(rows) + "\n")
+          PY
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

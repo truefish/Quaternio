@@ -6,12 +6,6 @@ pub struct VideoWeight {
     pub incoming: f32,
     pub black: f32 }
 
-impl VideoWeight {
-    pub fn sum(self) -> f32 {
-        self.outgoing + self.incoming + self.black
-    }
-}
-
 pub fn video_weight(kind: TransitionKind, progress: f32) -> VideoWeight {
     let p = progress.clamp(0.0, 1.0);
     match kind {
@@ -82,6 +76,10 @@ fn sequence_clip<'a>(sequence: &'a Sequence, id: u64) -> Option<&'a Clip> {
 
 pub fn transition_window(sequence: &Sequence, transition: &Transition) -> Option<(i64, i64)> {
     let clip = sequence_clip(sequence, transition.anchor.clip_id())?;
+    if matches!(transition.anchor, Anchor::Cut(_)) {
+        let track = sequence.tracks.iter().find(|t| t.clips.iter().any(|c| c.id == clip.id))?;
+        next_clip(track, clip)?;
+    }
     let duration = transition.duration.max(1);
     let (start, end) = match transition.anchor {
         Anchor::Head(_) => (clip.timeline_start, clip.timeline_start + duration),
@@ -106,7 +104,7 @@ fn next_clip<'a>(track: &'a Track, outgoing: &Clip) -> Option<&'a Clip> {
     track
         .clips
         .iter()
-        .filter(|clip| clip.id != outgoing.id && clip.timeline_start >= outgoing.end() - 1)
+        .filter(|clip| clip.id != outgoing.id && clip.timeline_start == outgoing.end())
         .min_by_key(|clip| (clip.timeline_start, clip.id))
 }
 
@@ -140,7 +138,7 @@ pub fn video_layers(sequence: &Sequence, track_index: usize, frame: i64) -> Vec<
             Anchor::Head(id) => {
                 claimed.push(id);
                 let opacity = clip_by_id(track, id)
-                    .map(|clip| clip.opacity)
+                    .map(|clip| clip.evaluated(frame).opacity)
                     .unwrap_or(1.0);
                 push_weighted(&mut layers, Some(id), weight.incoming * opacity);
                 push_weighted(&mut layers, None, weight.black);
@@ -148,7 +146,7 @@ pub fn video_layers(sequence: &Sequence, track_index: usize, frame: i64) -> Vec<
             Anchor::Tail(id) => {
                 claimed.push(id);
                 let opacity = clip_by_id(track, id)
-                    .map(|clip| clip.opacity)
+                    .map(|clip| clip.evaluated(frame).opacity)
                     .unwrap_or(1.0);
                 push_weighted(&mut layers, Some(id), weight.outgoing * opacity);
                 push_weighted(&mut layers, None, weight.black);
@@ -156,7 +154,7 @@ pub fn video_layers(sequence: &Sequence, track_index: usize, frame: i64) -> Vec<
             Anchor::Cut(id) => {
                 claimed.push(id);
                 let outgoing_opacity = clip_by_id(track, id)
-                    .map(|clip| clip.opacity)
+                    .map(|clip| clip.evaluated(frame).opacity)
                     .unwrap_or(1.0);
                 push_weighted(&mut layers, Some(id), weight.outgoing * outgoing_opacity);
                 if let Some(outgoing) = clip_by_id(track, id) {
@@ -165,7 +163,7 @@ pub fn video_layers(sequence: &Sequence, track_index: usize, frame: i64) -> Vec<
                         push_weighted(
                             &mut layers,
                             Some(incoming.id),
-                            weight.incoming * incoming.opacity,
+                            weight.incoming * incoming.evaluated(frame).opacity,
                         );
                     }
                 }
@@ -181,7 +179,7 @@ pub fn video_layers(sequence: &Sequence, track_index: usize, frame: i64) -> Vec<
         .collect();
     active.sort_by_key(|clip| (clip.timeline_start, clip.id));
     if let Some(clip) = active.last() {
-        let mut opacity = clip.opacity;
+        let mut opacity = clip.evaluated(frame).opacity;
         opacity *= edge_fade(sequence, clip, frame, true);
         opacity *= edge_fade(sequence, clip, frame, false);
         push_weighted(&mut layers, Some(clip.id), opacity);
@@ -259,19 +257,19 @@ pub fn audio_gains(sequence: &Sequence, track_index: usize, frame: i64) -> Vec<A
         match transition.anchor {
             Anchor::Head(id) => {
                 claimed.push(id);
-                push_gain(&mut gains, track, id, incoming);
+                push_gain(&mut gains, track, id, incoming, frame);
             }
             Anchor::Tail(id) => {
                 claimed.push(id);
-                push_gain(&mut gains, track, id, outgoing);
+                push_gain(&mut gains, track, id, outgoing, frame);
             }
             Anchor::Cut(id) => {
                 claimed.push(id);
-                push_gain(&mut gains, track, id, outgoing);
+                push_gain(&mut gains, track, id, outgoing, frame);
                 if let Some(outgoing_clip) = clip_by_id(track, id) {
                     if let Some(incoming_clip) = next_clip(track, outgoing_clip) {
                         claimed.push(incoming_clip.id);
-                        push_gain(&mut gains, track, incoming_clip.id, incoming);
+                        push_gain(&mut gains, track, incoming_clip.id, incoming, frame);
                     }
                 }
             }
@@ -280,17 +278,18 @@ pub fn audio_gains(sequence: &Sequence, track_index: usize, frame: i64) -> Vec<A
 
     for clip in &track.clips {
         if clip.contains(frame) && !claimed.contains(&clip.id) {
-            push_gain(&mut gains, track, clip.id, 1.0);
+            push_gain(&mut gains, track, clip.id, 1.0, frame);
         }
     }
     gains
 }
 
-fn push_gain(gains: &mut Vec<AudioGain>, track: &Track, id: u64, envelope: f32) {
+fn push_gain(gains: &mut Vec<AudioGain>, track: &Track, id: u64, envelope: f32, frame:i64) {
     let Some(clip) = clip_by_id(track, id) else {
         return;
     };
-    let gain = clip.volume.max(0.0) * envelope.max(0.0);
+    if clip.creative.freeze{return;}
+    let gain = clip.evaluated(frame).volume.max(0.0) * envelope.max(0.0);
     if gain <= 0.0001 {
         return;
     }

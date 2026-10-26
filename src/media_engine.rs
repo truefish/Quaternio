@@ -39,7 +39,10 @@ fn executable(name: &str) -> String {
 }
 
 pub fn command(path: &Path) -> Command {
+    #[cfg(windows)]
     let mut command = Command::new(path);
+    #[cfg(not(windows))]
+    let command = Command::new(path);
     #[cfg(windows)]
     { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
     command
@@ -331,3 +334,6 @@ fn extract(path: &Path, reader: &mut impl Read, stage: &Path, found: &mut std::c
     { if binary { use std::os::unix::fs::PermissionsExt; fs::set_permissions(stage.join(name), fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?; } }
     Ok(())
 }
+
+/// Enumerate compiled encoders on a background worker. Device usability is probed at export.
+pub(crate) fn encoder_names(path:&Path)->Result<Vec<String>,String>{let text=output(path,&["-hide_banner","-encoders"])?;Ok(text.lines().filter_map(|line|{let mut words=line.split_whitespace();let flags=words.next()?;let name=words.next()?;if flags.starts_with('V')&&name!="="{Some(name.to_string())}else{None}}).collect())}

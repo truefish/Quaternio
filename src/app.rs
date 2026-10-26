@@ -12,6 +12,14 @@ mod media_import;
 mod engine_setup;
 mod batch_relink;
 mod motion;
+mod creative;
+mod sequences;
+mod speech;
+mod portability;
+mod multicam;
+mod picture;
+mod autosave;
+mod project_home;
 mod review;
 mod collab;
 
@@ -149,6 +157,7 @@ struct MediaDrag {
 
 #[derive(Clone, Copy)]
 struct PendingInsert {
+    force_track:bool,
     media: u64,
     range: SourceRange,
     at: i64,
@@ -157,6 +166,13 @@ struct PendingInsert {
     format: (u32, u32, FrameRate) }
 
 struct AppState {
+    autosave: autosave::Autosave,
+    project_home: project_home::Home,
+    speech:speech::State,
+    collection:Option<portability::Job>,
+    multicam:Option<multicam::Job>,
+    creative_job:Option<creative::AudioJob>,
+    creative_clipboard: Option<Vec<crate::project::creative::Keyframe>>,
     collaboration: collab::State,
     batch_relink: batch_relink::Search,
     recovery: Option<crate::recovery::Recovery>,
@@ -325,6 +341,8 @@ impl AppState {
         preview.set_optimized_cache(Some(optimized_cache.clone()));
         source_preview.set_optimized_cache(Some(optimized_cache.clone()));
         Self {
+            autosave: autosave::Autosave::default(),
+            project_home: project_home::Home::default(),
             collaboration: collab::State::default(),
             batch_relink: batch_relink::Search::default(),
             recovery: None,
@@ -374,6 +392,11 @@ impl AppState {
             waiting_audio: false,
             waiting_picture: false,
             speed: 0.0,
+            creative_clipboard: None,
+            creative_job: None,
+            speech:Default::default(),
+            collection:None,
+            multicam:None,
             anchor_frame: 0,
             anchor_at: Instant::now(),
             view_w: 640.0,
@@ -461,6 +484,7 @@ pub fn run() -> anyhow::Result<()> {
     let file_drops = crate::platform_drag_drop::FileDropQueue::attach(ui.window());
     state.borrow_mut().native_events = Some(file_drops.clone());
     let recovered = live::initialize(&ui, &state).map_err(anyhow::Error::msg)?;
+    let resumed_live = recovered.is_some();
     if let Some(path) = std::env::args_os().nth(1).map(PathBuf::from) {
         if path.extension().and_then(|ext| ext.to_str()) == Some("quaternio") {
             match Project::load_from(&path) {
@@ -468,6 +492,7 @@ pub fn run() -> anyhow::Result<()> {
                     let mut current = state.borrow_mut();
                     current.editor = timeline::Editor::from_project(project);
                     current.editor.path = Some(path);
+                    { let mut autosave = std::mem::take(&mut current.autosave); autosave.observe(&current.editor); current.autosave = autosave; }
                     current.status = "Opened project".into();
                 }
                 Err(error) => state.borrow_mut().status = error }
@@ -517,12 +542,13 @@ pub fn run() -> anyhow::Result<()> {
         full_sync(&ui, &state);
         live::restore_ui_after_sync(&ui, &state);
     }
+    project_home::initialize(&ui,&state,resumed_live,std::env::args().any(|arg|arg.starts_with("--show-")));
     if std::env::args().any(|arg| arg == "--show-review") {
         on_command(&ui, &state, "review");
     } else if std::env::args().any(|arg| arg == "--show-activity") {
         on_command(&ui, &state, "activity");
     } else if std::env::args().any(|arg| arg == "--show-engine-setup") {
-        ui.set_show_engine_setup(true);
+        engine_setup::open(&ui);
     } else if std::env::args().any(|arg| arg == "--show-commands") {
         on_command(&ui, &state, "commands");
     } else if std::env::args().any(|arg| arg == "--show-preferences") {
@@ -692,7 +718,6 @@ fn wire(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     });
 
     let binding_ui = ui.as_weak();
-    let st = state.clone();
     ui.on_binding_edit(move |action| {
         if let Some(ui) = binding_ui.upgrade() {
             if let Some(item) = ACTIONS.iter().find(|item| item.id == action.as_str()) {
@@ -706,7 +731,6 @@ fn wire(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
         }
     });
     let binding_ui = ui.as_weak();
-    let st = state.clone();
     {
         let weak = ui.as_weak();
         let st = state.clone();
@@ -725,6 +749,7 @@ fn wire(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
             }
         });
     }
+    let st = state.clone();
     ui.on_binding_reset(move |action| {
         if let Some(ui) = binding_ui.upgrade() {
             let conflict = {
@@ -936,7 +961,7 @@ fn wire(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     let ui_resize = ui.as_weak();
     let st = state.clone();
     ui.on_resized(move |vw, vh, tw, th| {
-        let (body_changed, view_changed) = {
+        let body_changed = {
             let mut state = st.borrow_mut();
             let mut view_changed = false;
             if vw > 20.0 && ((vw - state.view_w).abs() > 1.0 || (vh - state.view_h).abs() > 1.0) {
@@ -954,7 +979,7 @@ fn wire(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
             if view_changed {
                 state.shown_frame = -1;
             }
-            (changed, view_changed)
+            changed
         };
         if body_changed {
             if let Some(ui) = ui_resize.upgrade() {
@@ -995,7 +1020,9 @@ fn on_key(
     }
     if ui.get_modal_open() {
         if key == "escape" {
-            ui.set_show_engine_setup(false);
+            if ui.get_show_project_manager() && ui.get_home_can_resume() && !ui.get_show_dialog() && !ui.get_show_prefs() {
+                ui.set_show_project_manager(false);
+            }
             ui.set_show_dialog(false);
             ui.set_show_prefs(false);
             ui.set_show_about(false);
@@ -1490,6 +1517,16 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
     // The update function exits after launching its helper. Keep the modal up
     // until it returns so no edits can race that exit after the unsaved guard.
     if state.borrow().update_applying { return; }
+    if project_home::handle(ui,state,command) { return; }
+    if command == "autosave-toggle" {
+        let mut current = state.borrow_mut();
+        current.preferences.autosave = !current.preferences.autosave;
+        current.autosave.reset();
+        ui.set_autosave_enabled(current.preferences.autosave);
+        drop(current);
+        save_preferences(state);
+        return;
+    }
     if let Some(value) = command.strip_prefix("track-density:").and_then(|v| v.parse::<i32>().ok()).filter(|v| (0..=3).contains(v)) {
         if ui.get_modal_open() || ui.get_live_reloading() || state.borrow().pointer.down { return; }
         {
@@ -1504,6 +1541,14 @@ fn on_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command:
         return;
     }
     if command == "activity" { ui.set_show_activity(!ui.get_show_activity()); ui.set_show_review(false); ui.set_show_session(false); return; }
+    if command=="export-format-changed"{if export_form::guard(ui,state){return;}let mut path=PathBuf::from(ui.get_export_filename().to_string());path.set_extension(if ui.get_export_container()==1{"wav"}else{"mp4"});ui.set_export_filename(path.to_string_lossy().into_owned().into());export_form::changed(ui,state);return;}
+    if matches!(command,"session"|"review"|"activity"){ui.set_show_creator(false);}
+    if picture::handle(ui,state,command){return;}
+    if multicam::handle(ui,state,command){return;}
+    if portability::handle(ui,state,command){return;}
+    if speech::handle(ui,state,command){return;}
+    if sequences::handle(ui,state,command){return;}
+    if creative::handle(ui,state,command){return;}
     if collab::handle(ui,state,command) { return; }
     if collab::readonly(&state.borrow()) && matches!(command,"insert"|"overwrite"|"paste"|"split"|"ripple-delete"|"lift-delete"|"lift"|"delete"|"nudge-left"|"nudge-right"|"nudge-left-10"|"nudge-right-10"|"track-up"|"track-down"|"link-clips"|"unlink-clips"|"reset-motion"|"reset-grade"|"remove-transition"|"review-add"|"review-import"|"import"|"import-timeline"|"relink-missing") { set_status(state,"This session is read-only. Leave it to edit a local copy.".into()); return; }
     if engine_setup::handle(ui, state, command) { return; }
@@ -2247,7 +2292,6 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             ui.set_show_activity(false);
             ui.set_show_session(false);
             batch_relink::cancel(state);
-            ui.set_show_engine_setup(false);
             let dismissing_popup = ui.get_modal_open() || ui.get_open_menu() != 0
                 || ui.get_show_command_palette();
             ui.set_show_dialog(false);
@@ -2299,17 +2343,7 @@ fn run_command(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, command
             state.shown_frame = -1;
             Some(())
         }
-        Command::New => return open_dialog(ui, state, true),
-        Command::Open => return open_project(ui, state),
-        Command::Save => return save_project(ui, state, false),
-        Command::SaveAs => return save_project(ui, state, true),
-        Command::Import => return import_media(ui, state),
-        Command::ImportTimeline => return begin_timeline_import(ui, state),
-        Command::ExportView => return on_command(ui, state, "export-view"),
-        Command::EditView => {
-            ui.set_page(0);
-            None
-        }
+
     };
     full_sync(ui, state);
 }
@@ -2405,6 +2439,7 @@ fn offer_sequence_match(
             sequence.width, sequence.height, sequence.frame_rate.label()
         ).into());
         PendingInsert {
+            force_track:false,
             media,
             range,
             at,
@@ -2467,7 +2502,8 @@ fn finish_sequence_match(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>
         current.editor.selected_media = Some(pending.media);
         current.editor.selected_track = pending.track;
     }
-    let result = state
+    let result=if pending.force_track{state.borrow_mut().editor.insert_media_on_track(pending.media,pending.at,pending.range,pending.track.unwrap_or(0),(choice==1).then_some(pending.format))}else{
+state
         .borrow_mut()
         .editor
         .insert_media_range_with_sequence_at(
@@ -2476,7 +2512,8 @@ fn finish_sequence_match(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>
             pending.overwrite,
             pending.range,
             (choice == 1).then_some(pending.format),
-        );
+        )
+    };
     match result {
         Ok(()) => {
             state.borrow_mut().sequence_match_offered = true;
@@ -2594,6 +2631,7 @@ fn on_adjust(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, field: &s
     if state.borrow().syncing {
         return;
     }
+    if state.borrow().editor.primary_clip().and_then(|id|state.borrow().editor.project.clip(id).map(|c|c.creative.text.is_some())).unwrap_or(false) && matches!(field,"rotation"|"scale-x"|"scale-y"|"anchor-x"|"anchor-y"|"crop-left"|"crop-right"|"crop-top"|"crop-bottom"|"flip-x"|"flip-y") {set_status(state,"Generated text supports position, uniform scale and opacity in this version.".into());full_sync(ui,state);return;}
     if field == "crf" {
         if export_form::guard(ui, state) { return; }
         ui.set_read_crf(SharedString::from(format!("{}", value.round() as i32)));
@@ -3092,8 +3130,9 @@ fn drag_edit(state: &Rc<std::cell::RefCell<AppState>>, x: f32, y: f32) {
     let scroll = state.editor.project.sequence.scroll as f32;
     let frame = frame_at(x, scroll, px);
     let threshold = (8.0 / px).ceil() as i64;
+    let precision=matches!(state.editor.tool,Tool::Slip|Tool::Roll|Tool::Slide);
     if !state.editor.gesture_active() {
-        match state.pointer.hit {
+        if precision{let grab=frame_at(state.pointer.x,scroll,px);let links=state.pointer.links;if let Err(error)=state.editor.begin_move(grab,links){state.status=error;return;}}else{match state.pointer.hit {
             Hit::Clip {
                 id,
                 edge: Some(edge) } => {
@@ -3115,9 +3154,9 @@ fn drag_edit(state: &Rc<std::cell::RefCell<AppState>>, x: f32, y: f32) {
                     return;
                 }
             }
-            _ => return }
+            _ => return }}
     }
-    if matches!(state.pointer.hit, Hit::Clip { edge: Some(_), .. }) {
+    if !precision && matches!(state.pointer.hit, Hit::Clip { edge: Some(_), .. }) {
         state.editor.update_trim(frame, threshold);
     } else {
         let target = rows_for(&state)
@@ -3207,8 +3246,10 @@ fn media_drop_target(
             }
         }
     }
+    let mut forced=std::borrow::Cow::Borrowed(&state.editor.project);
+    if match track.kind{TrackKind::Video=>sequence.targeting.video.is_some(),TrackKind::Audio=>sequence.targeting.audio.is_some()}{let p=forced.to_mut();match track.kind{TrackKind::Video=>p.sequence.targeting.video=None,TrackKind::Audio=>p.sequence.targeting.audio=None}}
     let placements = timeline::plan_placements_in_range(
-        &state.editor.project,
+        &forced,
         id as u64,
         Some(row.track_index),
         range,
@@ -3339,10 +3380,11 @@ fn on_media_drag(
                 current.editor.selected_media = Some(id as u64);
             }
             if offer_sequence_match(ui, state, id as u64, origin.range, frame, false) {
+                if let Some(pending)=&mut state.borrow_mut().pending_insert{pending.force_track=true;}
                 return;
             }
             act(state, |editor| {
-                editor.insert_media_range_at(id as u64, frame, false, origin.range)
+                editor.insert_media_on_track(id as u64, frame, origin.range, track, None)
             });
             focus_panel(ui, 3);
             full_sync(ui, state);
@@ -3568,7 +3610,13 @@ fn take_export_progress(rx: &Receiver<ExportProgress>) -> Option<ExportProgress>
 }
 
 fn tick(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    autosave::pump(ui, state);
+    project_home::pump(ui, state);
     collab::pump(ui,state);
+    creative::pump(ui,state);
+    speech::pump(ui,state);
+    portability::pump(ui,state);
+    multicam::pump(ui,state);
     engine_setup::pump(ui, state);
     batch_relink::pump(ui, state);
     {
@@ -3932,12 +3980,12 @@ fn waveform_picture(state: &AppState, clip: &Clip, x: f32, width: f32, height: f
     let image_height = ((height - 24.0).floor() as u32).clamp(4, 64);
     let rate = state.editor.project.sequence.frame_rate;
     let seconds_per_pixel = 1.0 / (state.editor.project.sequence.zoom * rate.fps());
-    let start = clip.source_start_seconds(rate) + (left-x) as f64 * seconds_per_pixel;
-    let end = start + visible as f64 * seconds_per_pixel;
+    let offset = (left-x) as f64 * seconds_per_pixel;
+    let seconds = visible as f64 * seconds_per_pixel;
     // Display a combined peak envelope (not a downmix).
     let mut columns = vec![playback::timeline_waveforms::Peak::default(); count];
     for channel in 0..peaks.channels {
-        for (dst, source) in columns.iter_mut().zip(peaks.columns(channel, start, end, count)) {
+        for (dst, source) in columns.iter_mut().zip(peaks.clip_columns(clip, rate, channel, offset, seconds, count)) {
             dst.min = dst.min.min(source.min); dst.max = dst.max.max(source.max);
         }
     }
@@ -4628,8 +4676,16 @@ fn wheel_text(value: f32) -> SharedString {
 }
 
 fn full_sync(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    ui.set_autosave_enabled(state.borrow().preferences.autosave);
+    ui.set_autosave_problem(state.borrow().autosave.problem.clone().unwrap_or_default().into());
+    {let s=state.borrow();ui.set_canvas_ratio(s.editor.project.sequence.width as f32/s.editor.project.sequence.height.max(1)as f32);}
     ui.set_track_density(state.borrow().preferences.track_density.clamp(0,3));
     review::sync(ui, &state.borrow());
+    creative::sync(ui,&state.borrow());
+    sequences::sync(ui,&state.borrow());
+    speech::sync(ui,&mut state.borrow_mut());
+    picture::sync(ui,&state.borrow());
+    multicam::sync(ui,&state.borrow());
     motion::sync(ui, &state.borrow().editor);
     sync_media_selection(&mut state.borrow_mut());
     sync_import_ui(ui, &state.borrow());
@@ -4820,6 +4876,9 @@ fn full_sync(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     };
     ui.set_project_name(SharedString::from(project_name));
     ui.set_source_name(SharedString::from(source_name));
+    { let current = state.borrow(); let source = current.editor.primary_clip().and_then(|id| current.editor.project.clip(id)).map(|clip| {
+        current.editor.project.media(clip.media_id).map(|m| m.name.clone()).unwrap_or_else(|| if clip.creative.text.is_some() { "Generated text".into() } else { clip.name.clone() })
+      }).unwrap_or_else(|| "No clip selected".into()); ui.set_clip_source_name(source.into()); }
     ui.set_seq_name(SharedString::from(seq_name));
     ui.set_seq_fps(SharedString::from(seq_fps));
     ui.set_footer_scratch(SharedString::from(scratch));
@@ -4922,7 +4981,6 @@ struct SyncSnap {
     armed: String,
     shuttle: String,
     zoom: String,
-    hints: shortcuts::Hints,
     bin: Vec<BinItem>,
     heads: Vec<TrackHead>,
     clips: Vec<ClipView>,
@@ -4984,7 +5042,6 @@ impl SyncSnap {
         let dirty = if editor.dirty { "*" } else { "" };
         let title = format!("Quaternio — {}{dirty}", editor.project.name);
         let (inspector_mode, inspector_title, clip_vals) = inspector(editor);
-        let hints = shortcuts::hints(editor.project.shortcut_profile);
         Self {
             title,
             profile: profile.into(),
@@ -5005,7 +5062,6 @@ impl SyncSnap {
                 .unwrap_or_default(),
             shuttle: shuttle_parts(state.playing, state.speed).0,
             zoom: zoom_percent(seq.zoom),
-            hints,
             bin: bin_views(state),
             heads: head_views(state),
             clips: clip_views(state),
@@ -5126,6 +5182,7 @@ fn inspector(editor: &timeline::Editor) -> (i32, String, ClipVals) {
     let Some(clip) = editor.project.clip(id) else {
         return (0, "No selection".into(), vals);
     };
+    let evaluated=clip.evaluated(editor.project.sequence.playhead);let clip=&*evaluated;
     vals.pos_x = clip.pos_x;
     vals.pos_y = clip.pos_y;
     vals.scale = clip.scale;
@@ -5133,7 +5190,7 @@ fn inspector(editor: &timeline::Editor) -> (i32, String, ClipVals) {
     vals.volume = clip.volume;
     if let Some(audio) = editor.linked_audio(id) {
         if let Some(audio_clip) = editor.project.clip(audio) {
-            vals.volume = audio_clip.volume;
+            vals.volume = audio_clip.evaluated(editor.project.sequence.playhead).volume;
         }
     }
     vals.exposure = clip.grade.exposure;
@@ -5460,7 +5517,7 @@ fn source_project(media: &Media) -> Project {
         }
         let track = project.add_track(kind);
         let id = project.alloc();
-        project.sequence.tracks[track].clips.push(Clip {
+        project.sequence.tracks[track].clips.push(Clip { creative: Default::default(),
             transform: Default::default(),
             id,
             media_id,
@@ -5634,6 +5691,7 @@ fn pump_source_preview(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>)
                 return;
             }
             let before_upload = Instant::now();
+            picture::scopes(ui,&image.image);
             ui.set_source_image(to_image(&image.image));
             ui.set_show_source_picture(true);
             current.source_feedback.picture(is_latest, Instant::now());
@@ -5722,25 +5780,25 @@ fn create_project(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
     state_mut.picture_gen = state_mut.picture_gen.wrapping_add(1);
     drop(state_mut);
     ui.set_show_dialog(false);
+    ui.set_show_project_manager(false);
     set_preview_default(ui, state);
     full_sync(ui, state);
 }
 
 fn apply_sequence(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
-    let Some((width, height)) = read_dialog_dimensions(ui) else {
-        return;
-    };
+    let Some((width, height)) = read_dialog_dimensions(ui) else { return; };
     let rate = rate_from_index(ui.get_dlg_fps());
-    {
-        let mut state = state.borrow_mut();
-        let _ = state.editor.edit("sequence", move |project| {
-            project.set_resolution(width, height);
-            project.set_frame_rate(rate);
-            Ok(())
-        });
-        state.status = "Sequence settings updated".into();
-        state.edit_gen = state.edit_gen.wrapping_add(1);
-        state.picture_gen = state.picture_gen.wrapping_add(1);
+    let result = state.borrow_mut().editor.edit("sequence", move |project| {
+        project.set_resolution(width, height);
+        project.set_frame_rate(rate);
+        project.validate_sequences().map_err(|_| "This frame rate would overlap short clips. Keep the current rate or adjust those cuts first.".to_string())?;
+        Ok(())
+    });
+    if let Err(error) = result { ui.set_dialog_error(error.into()); return; }
+    { let mut current = state.borrow_mut();
+      current.status = "Sequence settings updated".into();
+      current.edit_gen = current.edit_gen.wrapping_add(1);
+      current.picture_gen = current.picture_gen.wrapping_add(1);
     }
     ui.set_show_dialog(false);
     set_preview_default(ui, state);
@@ -5810,6 +5868,7 @@ fn open_project_path(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, p
             state_mut.editor = timeline::Editor::from_project(project);
             state_mut.editor.path = Some(path);
             state_mut.editor.dirty = false;
+            { let mut autosave = std::mem::take(&mut state_mut.autosave); autosave.observe(&state_mut.editor); state_mut.autosave = autosave; }
             state_mut.status = "Opened project".into();
             state_mut.edit_gen = state_mut.edit_gen.wrapping_add(1);
             state_mut.picture_gen = state_mut.picture_gen.wrapping_add(1);
@@ -5822,7 +5881,9 @@ fn open_project_path(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, p
                 "premiere".into()
             };
             save_preferences(state);
+            ui.set_show_project_manager(false);
             full_sync(ui, state);
+            project_home::remember(ui,state,false);
         }
         Err(err) => {
             set_status(state, err);
@@ -5832,6 +5893,7 @@ fn open_project_path(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, p
 }
 
 fn confirm_unsaved(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) -> bool {
+    state.borrow_mut().autosave.reset();
     if !state.borrow().editor.dirty {
         return true;
     }
@@ -5856,6 +5918,7 @@ fn try_save_project(
     state: &Rc<std::cell::RefCell<AppState>>,
     save_as: bool,
 ) -> bool {
+    state.borrow_mut().autosave.reset();
     let existing = state.borrow().editor.path.clone();
     let path = if save_as || existing.is_none() {
         let name = format!("{}.quaternio", state.borrow().editor.project.name);
@@ -5871,6 +5934,10 @@ fn try_save_project(
     } else {
         existing.unwrap()
     };
+    if !save_as && state.borrow().editor.path.as_ref() == Some(&path) {
+        let check = { let mut current = state.borrow_mut(); let mut autosave = std::mem::take(&mut current.autosave); let result = autosave.check_disk(&current.editor); current.autosave = autosave; result };
+        if let Err(error) = check { set_status(state, error); full_sync(ui, state); return false; }
+    }
     let result = {
         let state = state.borrow();
         state.editor.project.save_to(&path)
@@ -5881,10 +5948,12 @@ fn try_save_project(
             let mut state = state.borrow_mut();
             state.editor.path = Some(path);
             state.editor.mark_saved();
+            { let mut autosave = std::mem::take(&mut state.autosave); autosave.observe(&state.editor); state.autosave = autosave; }
             state.status = "Saved".into();
         }
         Err(err) => set_status(state, err) }
     full_sync(ui, state);
+    if saved { project_home::remember(ui,state,true); }
     saved
 }
 
@@ -6266,6 +6335,15 @@ fn handle_dropped_files(
     paths: Vec<PathBuf>,
 ) {
     ui.set_file_drop_hover(false);
+    if ui.get_show_project_manager() && !ui.get_show_dialog() && !ui.get_show_prefs()
+        && !ui.get_live_reloading() && !state.borrow().update_applying && !state.borrow().export_running {
+        if let Some(path) = paths.iter().find(|p|p.extension().is_some_and(|e|e.eq_ignore_ascii_case("quaternio"))) {
+            open_project_path(ui,state,path.clone());
+            return;
+        }
+        ui.set_home_status("Create or open a project before importing media.".into());
+        return;
+    }
     if ui.get_modal_open() || ui.get_live_reloading()
         || state.borrow().export_running || state.borrow().update_applying
     {

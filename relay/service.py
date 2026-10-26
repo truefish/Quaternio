@@ -152,6 +152,23 @@ def credentials(ttl=86400):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    REQUEST_SECONDS = 15
+
+    def expire_request(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def handle_one_request(self):
+        self.request_deadline = threading.Timer(self.REQUEST_SECONDS, self.expire_request)
+        self.request_deadline.daemon = True
+        self.request_deadline.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self.request_deadline.cancel()
+
     def log_message(self, *_):
         pass
 
@@ -211,8 +228,8 @@ class Handler(BaseHTTPRequestHandler):
     def public_session(self):
         if not PUBLIC:
             return self.reply(404, {"error": "Public sessions are disabled"})
-        if self.headers.get("Content-Length", "0") != "0":
-            self.body()
+        if self.headers.get("Content-Length", "0") != "0" or self.headers.get("Transfer-Encoding"):
+            return self.reply(400, {"error": "Public session requests do not accept a body"})
         if not allowed(("issue", self.identity()), 4, 3600) or not allowed(("issue-global",), 24, 3600):
             return self.reply(429, {"error": "Public service is busy; try direct/manual connection"})
         with LOCK:
@@ -267,6 +284,7 @@ class Handler(BaseHTTPRequestHandler):
                 tunnel.close()
         writer = None
         try:
+            self.request_deadline.cancel()
             self.connection.settimeout(90)
             self.send_response(101)
             self.send_header("Upgrade", "websocket")

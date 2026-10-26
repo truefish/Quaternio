@@ -345,7 +345,7 @@ fn companion_names() -> &'static [&'static str] {
 fn spawn_replace_and_exit(install_dir: &Path, payload: &Path) -> Result<(), String> {
     let pid = std::process::id();
     let helper = updates_dir().join(if cfg!(windows) {
-        "apply-update.bat"
+        "apply-update.ps1"
     } else {
         "apply-update.sh"
     });
@@ -361,8 +361,11 @@ fn spawn_replace_and_exit(install_dir: &Path, payload: &Path) -> Result<(), Stri
 
     #[cfg(windows)]
     {
-        Command::new("cmd")
-            .args(["/C", &helper.display().to_string()])
+        use std::os::windows::process::CommandExt;
+        Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&helper)
+            .creation_flags(0x08000000)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -399,23 +402,18 @@ fn write_helper(
     }
     #[cfg(windows)]
     {
-        let mut script = String::from("@echo off\r\nsetlocal\r\n");
-        script.push_str(&format!(":wait\r\ntasklist /FI \"PID eq {pid}\" 2>NUL | find \"{pid}\" >NUL\r\nif not errorlevel 1 (\r\n  timeout /t 1 /nobreak >NUL\r\n  goto wait\r\n)\r\n"));
+        let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "''"));
+        let mut script = format!("$ErrorActionPreference = 'Stop'\r\nWait-Process -Id {pid} -ErrorAction SilentlyContinue\r\n");
         for name in files {
-            let src = payload.join(name);
-            let dst = install_dir.join(name);
-            script.push_str(&format!(
-                "copy /Y \"{}\" \"{}\" >NUL\r\n",
-                src.display(),
-                dst.display()
-            ));
+            script.push_str(&format!("Copy-Item -Force -LiteralPath {} -Destination {}\r\n", quote(&payload.join(name)), quote(&install_dir.join(name))));
         }
-        script.push_str(&format!("start \"\" \"{}\"\r\n", launch.display()));
-        script.push_str(&format!("del \"%~f0\"\r\n"));
-        fs::write(helper, script).map_err(|e| e.to_string())?;
+        script.push_str(&format!("Start-Process -FilePath {}\r\nRemove-Item -LiteralPath $PSCommandPath\r\n", quote(launch)));
+        // Windows PowerShell 5 requires a BOM for non-ASCII script paths.
+        fs::write(helper, format!("\u{feff}{script}")).map_err(|e| e.to_string())?;
     }
     #[cfg(not(windows))]
     {
+        let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
         let mut script = String::from("#!/bin/sh\nset -eu\n");
         script.push_str(&format!(
             "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done\n"
@@ -424,15 +422,15 @@ fn write_helper(
             let src = payload.join(name);
             let dst = install_dir.join(name);
             script.push_str(&format!(
-                "cp -f '{}' '{}'\n",
-                src.display(),
-                dst.display()
+                "cp -f -- {} {}\n",
+                quote(&src),
+                quote(&dst)
             ));
             if name == binary_name() || name == "ffmpeg" || name == "ffprobe" {
-                script.push_str(&format!("chmod +x '{}'\n", dst.display()));
+                script.push_str(&format!("chmod +x -- {}\n", quote(&dst)));
             }
         }
-        script.push_str(&format!("'{}' &\n", launch.display()));
+        script.push_str(&format!("{} &\n", quote(launch)));
         script.push_str("rm -f -- \"$0\"\n");
         fs::write(helper, script).map_err(|e| e.to_string())?;
     }

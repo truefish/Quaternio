@@ -7,6 +7,13 @@ use std::sync::OnceLock;
 const PARALLEL_PIXEL_THRESHOLD: usize = 128 * 1024;
 const OCCLUSION_PREFETCH_BYTES: usize = 32 * 1024 * 1024;
 
+thread_local!{static ROUTE:std::cell::Cell<(usize,bool,bool)>=const{std::cell::Cell::new((0,false,false))};}
+struct RenderTrace;
+impl RenderTrace{fn begin()->Self{ROUTE.with(|r|{let(depth,cpu,gpu)=r.get();r.set((depth+1,depth>0&&cpu,depth>0&&gpu));});Self}}
+impl Drop for RenderTrace{fn drop(&mut self){ROUTE.with(|r|{let(depth,cpu,gpu)=r.get();r.set((depth.saturating_sub(1),cpu,gpu));});}}
+pub(crate) fn record_compositor(gpu:bool){ROUTE.with(|r|{let(depth,cpu,previous_gpu)=r.get();r.set((depth,cpu||!gpu,previous_gpu||gpu));});}
+pub(crate) fn picture_route()->&'static str{ROUTE.with(|r|match r.get(){(_,true,true)=>"mixed_cpu_gpu_composite_bounded_pipe",(_,_,true)=>"gpu_composite_bounded_pipe",_=>"cpu_composite_bounded_pipe"})}
+
 /// One shared, bounded pool keeps preview and export from creating competing
 /// sets of compositor workers. Two logical CPUs remain outside this pool.
 fn render_pool() -> Option<&'static rayon::ThreadPool> {
@@ -103,6 +110,9 @@ impl ImageBuf {
 
 pub trait FrameSource {
     fn video(&mut self, media_id: u64, time_secs: f64, max_w: u32, max_h: u32) -> Option<ImageBuf>;
+    fn video_float(&mut self,media_id:u64,time:f64,w:u32,h:u32)->Option<std::sync::Arc<super::precision::FloatImage>>{
+        self.video(media_id,time,w,h).map(|image|std::sync::Arc::new(super::precision::FloatImage::from_byte(&image)))
+    }
 
     /// Preview cancellation is distinct from a missing or corrupt source frame.
     fn is_superseded(&self) -> bool {
@@ -134,6 +144,9 @@ pub fn composite(
     canvas_h: u32,
     source: &mut dyn FrameSource,
 ) -> ImageBuf {
+    let _trace=RenderTrace::begin();
+    if super::precision::needed(project){return super::precision::render(project,frame,canvas_w,canvas_h,source).to_byte();}
+    record_compositor(false);
     composite_impl(project, frame, canvas_w, canvas_h, source, true, true)
 }
 
@@ -211,9 +224,18 @@ fn composite_planned(
             return dst;
         }
         let layers = &plan.layers;
+        if layers.iter().any(|l|l.clip_id.and_then(|id|project.clip(id)).is_some_and(|c|c.creative.adjustment)) {
+            for l in layers {if let Some(c)=l.clip_id.and_then(|id|project.clip(id)).filter(|c|c.creative.adjustment){let c=c.evaluated(frame);let grade=PreparedByteGrade::new(c.grade);let amount=l.weight.clamp(0.,1.);for pixel in dst.rgb.chunks_exact_mut(3){let original=[pixel[0],pixel[1],pixel[2]];let adjusted=grade.grade_u8(original);for i in 0..3{pixel[i]=(original[i]as f32+(adjusted[i]as f32-original[i]as f32)*amount).round()as u8;}}}}
+            continue;
+        }
+        if layers.iter().any(|l|l.clip_id.and_then(|id|project.clip(id)).is_some_and(|c|c.creative.text.is_some())){
+            for layer in layers{if let Some(c)=layer.clip_id.and_then(|id|project.clip(id)){let c=c.evaluated(frame);super::text::draw(&mut dst,&c,project.sequence.width,layer.weight);}}
+            continue;
+        }
         if layers.len() == 1 && layers[0].weight == 1.0 {
             if let Some(id) = layers[0].clip_id {
                 if let Some(clip) = project.clip(id) {
+                    let evaluated=clip.evaluated(frame);let clip=&*evaluated;
                     let image = plan.decoded.take().unwrap_or_else(|| {
                         decode_clip_image(project, clip, frame, canvas_w, canvas_h, source)
                     });
@@ -250,6 +272,7 @@ fn composite_planned(
                 }
                 Some(id) => {
                     if let Some(clip) = project.clip(id) {
+                    let evaluated=clip.evaluated(frame);let clip=&*evaluated;
                         blit_clip(
                             project,
                             clip,
@@ -307,6 +330,13 @@ fn decode_clip_image(
 ) -> Option<ImageBuf> {
     let local = frame.saturating_sub(clip.timeline_start);
     let time = clip.source_time_seconds(local, project.sequence.frame_rate);
+    if let Some(camera)=clip.creative.multicam.as_ref().and_then(|m|m.angle(local+clip.creative.offset)){let time=time+camera.offset;if time<0.{return None;}return source.video(camera.media_id,time,canvas_w,canvas_h).filter(valid_image);}
+    if let Some(id)=clip.creative.sequence.as_deref(){
+        let mut nested=project.clone();nested.switch_sequence(id).ok()?;
+        let frame=nested.sequence.frame_rate.seconds_to_frame(time);
+        let (w,h)=super::decode::fitted_size(nested.sequence.width,nested.sequence.height,canvas_w,canvas_h);
+        return Some(composite(&nested,frame,w,h,source));
+    }
     source
         .video(clip.media_id, time.max(0.0), canvas_w, canvas_h)
         .filter(valid_image)
@@ -347,6 +377,9 @@ fn find_occlusion_start(
         let Some(clip) = project.clip(id) else {
             continue;
         };
+        if clip.creative.adjustment {continue;}
+        let evaluated=clip.evaluated(frame);let clip=&*evaluated;
+        if clip.creative.text.is_some(){continue;}
         // Fitting cannot fill both canvas axes at less than 100% scale. A
         // translated fitted picture at 100% also cannot cover the whole canvas.
         // These checks only reject candidates; decoded dimensions prove coverage.

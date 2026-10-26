@@ -154,6 +154,9 @@ impl View {
 
 #[derive(Serialize, Deserialize)]
 struct SavedSettings {
+    #[serde(default="saved_burn_captions")]burn_captions:bool,
+    #[serde(default)]delivery:crate::export::Delivery,
+    #[serde(default)]backend:Option<String>,
     width: u32,
     height: u32,
     frame_rate: FrameRate,
@@ -170,9 +173,11 @@ struct SavedSettings {
     use_in_out: bool,
     output: PathBuf }
 
+fn saved_burn_captions()->bool{true}
 impl SavedSettings {
     fn capture(value: &ExportSettings) -> Self {
         Self {
+            burn_captions:value.burn_captions,delivery:value.delivery,backend:value.backend.clone(),
             width: value.width,
             height: value.height,
             frame_rate: value.frame_rate,
@@ -200,7 +205,7 @@ impl SavedSettings {
         {
             return Err("Invalid recovered export settings".into());
         }
-        Ok(ExportSettings {
+        Ok(ExportSettings { burn_captions:self.burn_captions,delivery:self.delivery,backend:self.backend,
             width: self.width,
             height: self.height,
             frame_rate: self.frame_rate,

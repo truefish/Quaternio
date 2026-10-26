@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+pub mod management;
+pub mod scopes;
 
 /// One grade. Basic correction follows Lumetri order, then lift / gamma / gain.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -182,22 +184,6 @@ impl PreparedGrade {
         ]
     }
 
-    #[inline]
-    pub fn grade_u8(&self, rgb: [u8; 3]) -> [u8; 3] {
-        if self.identity {
-            return rgb;
-        }
-        let linear = self.grade_rgb([
-            rgb[0] as f32 / 255.0,
-            rgb[1] as f32 / 255.0,
-            rgb[2] as f32 / 255.0,
-        ]);
-        [
-            (linear[0] * 255.0).round() as u8,
-            (linear[1] * 255.0).round() as u8,
-            (linear[2] * 255.0).round() as u8,
-        ]
-    }
 }
 
 /// Exact basic correction for byte-decoded pictures. These operations depend
@@ -248,18 +234,3 @@ impl PreparedByteGrade {
         self.grade_rgb(rgb).map(|channel| (channel * 255.0).round() as u8)
     }
 }
-
-pub fn grade_rgb(rgb: [f32; 3], grade: Grade) -> [f32; 3] {
-    if grade.is_identity() {
-        return rgb;
-    }
-    PreparedGrade::new(grade).grade_rgb(rgb)
-}
-
-pub fn grade_u8(rgb: [u8; 3], grade: Grade) -> [u8; 3] {
-    if grade.is_identity() {
-        return rgb;
-    }
-    PreparedGrade::new(grade).grade_u8(rgb)
-}
-

@@ -22,6 +22,8 @@ struct SelectionKey {
     height: u32,
     rate: (u32, u32),
     quality: u8,
+    delivery:Delivery,
+    backend:Option<String>,
     candidates: Vec<VideoEncoder>,
     runtime: Vec<Option<std::ffi::OsString>>,
 }
@@ -35,6 +37,7 @@ fn selection_key(ffmpeg: &Path, settings: &ExportSettings, candidates: Vec<Video
         height: settings.height.max(16) & !1,
         rate: (settings.frame_rate.num, settings.frame_rate.den),
         quality: settings.crf.clamp(1, 40),
+        delivery:settings.delivery,backend:settings.backend.clone(),
         candidates,
         runtime: runtime_identity(),
     })
@@ -203,10 +206,11 @@ pub(super) fn preferred(
     if cancel.load(Ordering::Acquire) {
         return Err("Export cancelled".into());
     }
-    if matches!(settings.encoder, EncoderPreference::Cpu) {
+    if settings.backend.as_deref().is_some_and(|b|b=="libx264"||b=="libx265") || settings.backend.is_none()&&matches!(settings.encoder, EncoderPreference::Cpu) {
         return Ok(VideoEncoder::Cpu);
     }
-    let (candidates, discovery_reason) = selected_candidates(settings);
+    let (mut candidates, discovery_reason) = selected_candidates(settings);
+    if let Some(name)=&settings.backend{candidates.retain(|c|match c{VideoEncoder::Nvenc=>name.ends_with("_nvenc"),VideoEncoder::Qsv=>name.ends_with("_qsv"),VideoEncoder::Amf(_)=>name.ends_with("_amf"),VideoEncoder::VideoToolbox=>name.ends_with("_videotoolbox"),VideoEncoder::Vaapi(_)=>name.ends_with("_vaapi"),_=>false});if candidates.is_empty(){return Err("The selected encoder is not available on this system".into());}}
     let key = selection_key(ffmpeg, settings, candidates.clone());
     let cached = key
         .as_ref()
@@ -261,7 +265,7 @@ pub(super) fn preferred(
                 .args(["-an", "-frames:v", "6", "-vf", encoder.software_frame_filter()]);
             encoder.configure(&mut command, settings);
             encoder.configure_pixel_format(&mut command);
-            command.args(["-f", "h264", "pipe:1"]);
+            command.args(["-f", settings.delivery.stream_format(), "pipe:1"]);
             match probe(command, cancel, remaining.min(Duration::from_secs(8)))? {
                 Ok(()) => {
                     selection.encoder = encoder;
@@ -292,9 +296,9 @@ pub(super) fn preferred(
         diagnostics::record(|d| d.fallback_reasons.push(selection.reason.clone()));
     }
     if selection.encoder == VideoEncoder::Cpu {
-        if matches!(settings.encoder, EncoderPreference::Hardware | EncoderPreference::Amd(_)) {
+        if settings.backend.is_some() || matches!(settings.encoder, EncoderPreference::Hardware | EncoderPreference::Amd(_)) {
             return Err(format!(
-                "Hardware encoding is unavailable at {}x{} {}/{} fps using {}. {}Check this FFmpeg build's H.264 encoders and the GPU driver/device access, or choose Auto/CPU.",
+                "Hardware encoding is unavailable at {}x{} {}/{} fps using {}. {}Check this FFmpeg build's selected codec encoders and the GPU driver/device access, or choose Auto/CPU.",
                 settings.width.max(16) & !1, settings.height.max(16) & !1,
                 settings.frame_rate.num, settings.frame_rate.den, ffmpeg.display(), selection.reason
             ));
@@ -412,6 +416,8 @@ struct ResidentKey {
     speed: RenderSpeed,
     rate: (u32, u32),
     quality: u8,
+    delivery:Delivery,
+    backend:Option<String>,
     encoder: VideoEncoder,
     device: Option<Fingerprint>,
     // Environment identity is cheap and bounded; no driver discovery subprocess.
@@ -425,7 +431,8 @@ fn resident_key(ffmpeg: &Path, plan: &DirectExport, settings: &ExportSettings, e
         source_size: (plan.source_width, plan.source_height),
         first_frame: plan.first_frame, frame_count: plan.frame_count,
         speed: settings.speed, rate: (settings.frame_rate.num, settings.frame_rate.den),
-        quality: settings.crf.clamp(1, 40), encoder: encoder.clone(),
+        quality: settings.crf.clamp(1, 40),
+        delivery:settings.delivery,backend:settings.backend.clone(), encoder: encoder.clone(),
         device: match encoder { VideoEncoder::Vaapi(path) => fingerprint(path), _ => None },
         runtime: runtime_identity(),
     })
@@ -468,7 +475,7 @@ pub(super) fn resident_available(
         .arg("-enc_time_base:v").arg(format!("{}/{}", settings.frame_rate.den, settings.frame_rate.num))
         .args(crate::media_engine::passthrough_args(ffmpeg)?);
     encoder.configure(&mut command, settings);
-    command.args(["-f", "h264", "pipe:1"]);
+    command.args(["-f", settings.delivery.stream_format(), "pipe:1"]);
     // Long source trims may time out. Conservatively use the ordinary route;
     // never replace frame-accurate trimming with an approximate input seek.
     let result = diagnostics::measure(diagnostics::ExportStage::RouteProbe,

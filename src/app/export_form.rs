@@ -3,6 +3,7 @@ use crate::preferences::ExportFormat;
 
 #[derive(Default)]
 pub(super) struct State {
+    capability_path:Option<PathBuf>,capability_rx:Option<Receiver<Result<Vec<String>,String>>>,encoders:Vec<String>,capability_codec:Option<i32>,
     initialized_destination: bool,
     default_destination: Option<(Option<PathBuf>, String, PathBuf)>,
     pending: Option<Pending>,
@@ -17,12 +18,12 @@ pub(super) struct State {
 struct Fields {
     filename: String, folder: String, path: String, width: String, height: String,
     fps: i32, custom_rate: String, crf: f32, speed: i32, encoder: i32, inout: bool,
-    amd_adapter: String,
+    amd_adapter: String,container:i32,codec:i32,backend:String,burn_captions:bool,
 }
 
 impl Fields {
     fn capture(ui: &AppWindow) -> Self {
-        Self { filename: ui.get_export_filename().to_string(), folder: ui.get_export_folder().to_string(),
+        Self { burn_captions:ui.get_export_burn_captions(),container:ui.get_export_container(),codec:ui.get_export_codec(),backend:ui.get_export_backend().to_string(),filename: ui.get_export_filename().to_string(), folder: ui.get_export_folder().to_string(),
             amd_adapter: ui.get_export_amd_adapter().to_string(),
             path: ui.get_export_path().to_string(), width: ui.get_export_width().to_string(), height: ui.get_export_height().to_string(),
             fps: ui.get_export_fps(), custom_rate: ui.get_export_custom_rate().to_string(), crf: ui.get_export_crf(),
@@ -30,6 +31,7 @@ impl Fields {
     }
 
     fn restore(&self, ui: &AppWindow) {
+        ui.set_export_burn_captions(self.burn_captions);ui.set_export_container(self.container);ui.set_export_codec(self.codec);ui.set_export_backend(self.backend.clone().into());
         ui.set_export_amd_adapter(self.amd_adapter.clone().into());
         ui.set_export_filename(self.filename.clone().into());
         ui.set_export_folder(self.folder.clone().into());
@@ -116,8 +118,8 @@ fn amd_adapter(ui: &AppWindow) -> Result<Option<u32>, String> {
 
 pub(super) fn settings(ui: &AppWindow, project: &Project) -> Result<ExportSettings, String> {
     let output = export_destination::resolve(&ui.get_export_folder(), &ui.get_export_filename())?;
-    let (width, height) = parse_export_dimensions(&ui.get_export_width(), &ui.get_export_height())?;
-    let frame_rate = rate(ui)?;
+    let (width, height) = if ui.get_export_container()==1{(project.sequence.width.max(16),project.sequence.height.max(16))}else{parse_export_dimensions(&ui.get_export_width(), &ui.get_export_height())?};
+    let frame_rate = if ui.get_export_container()==1{project.sequence.frame_rate}else{rate(ui)?};
     if !ui.get_export_crf().is_finite() || !(14.0..=28.0).contains(&ui.get_export_crf()) {
         return Err("Choose a quality from 14 to 28.".into());
     }
@@ -130,8 +132,10 @@ pub(super) fn settings(ui: &AppWindow, project: &Project) -> Result<ExportSettin
         3 => EncoderPreference::Amd(amd_adapter(ui)?),
         _ => return Err("Choose an encoding method.".into()),
     };
+    let extension=output.extension().and_then(|s|s.to_str()).unwrap_or("");
+    if !(if ui.get_export_container()==1{extension.eq_ignore_ascii_case("wav")}else{extension.eq_ignore_ascii_case("mp4")}){return Err("Match the filename extension to the selected format (.mp4 or .wav).".into());}
     range(project, ui.get_export_inout())?;
-    Ok(ExportSettings { output, width, height, frame_rate, crf: ui.get_export_crf().round() as u8,
+    Ok(ExportSettings { burn_captions:ui.get_export_burn_captions(),delivery:match ui.get_export_container(){1=>crate::export::Delivery::Wav,_=>if ui.get_export_codec()==1{crate::export::Delivery::Hevc}else{crate::export::Delivery::H264}},backend:if ui.get_export_backend().is_empty(){None}else{Some(ui.get_export_backend().to_string())},output, width, height, frame_rate, crf: ui.get_export_crf().round() as u8,
         speed, encoder, use_in_out: ui.get_export_inout(), force_composite: false })
 }
 
@@ -175,9 +179,9 @@ pub(super) fn browse(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, f
         if let Some(path) = dialog.set_title("Choose export folder").pick_folder() {
             ui.set_export_folder(path.display().to_string().into());
         }
-    } else if let Some(path) = dialog.set_title("Export MP4").set_file_name(ui.get_export_filename().as_str())
-        .add_filter("MP4 video", &["mp4"]).save_file() {
-        set_path(ui, &ensure_extension(path, "mp4"));
+    } else if let Some(path) = dialog.set_title("Export media").set_file_name(ui.get_export_filename().as_str())
+        .add_filter(if ui.get_export_container()==1{"WAV audio"}else{"MP4 video"}, if ui.get_export_container()==1{&["wav"]}else{&["mp4"]}).save_file() {
+        set_path(ui, &ensure_extension(path, if ui.get_export_container()==1{"wav"}else{"mp4"}));
     }
     changed(ui, state);
 }
@@ -281,6 +285,7 @@ pub(super) fn cancel_check(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppStat
 }
 
 pub(super) fn pump(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
+    capabilities(ui,state);
     let retired = state.borrow().export_form.cancelled_check.as_ref()
         .is_some_and(|rx| !matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
     if retired { state.borrow_mut().export_form.cancelled_check = None; }
@@ -451,6 +456,7 @@ fn valid(format: &ExportFormat) -> bool {
         && format.frame_rate.num > 0 && format.frame_rate.den > 0
         && format.frame_rate.fps() <= 1000.0 && format.crf.is_finite()
         && (14.0..=28.0).contains(&format.crf)
+        && (0..=1).contains(&format.container) && (0..=1).contains(&format.codec)
         && (0..=2).contains(&format.speed) && (0..=3).contains(&format.encoder)
 }
 
@@ -458,7 +464,7 @@ pub(super) fn remember(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>)
     if !ui.get_export_initialized() { return; }
     let Ok((width, height)) = parse_export_dimensions(&ui.get_export_width(), &ui.get_export_height()) else { return; };
     let Ok(frame_rate) = rate(ui) else { return; };
-    let format = ExportFormat { width, height, frame_rate, crf: ui.get_export_crf(), speed: ui.get_export_speed(), encoder: ui.get_export_encoder(), amd_adapter: amd_adapter(ui).ok().flatten() };
+    let format = ExportFormat {container:ui.get_export_container(),codec:ui.get_export_codec(),backend:ui.get_export_backend().to_string(),width, height, frame_rate, crf: ui.get_export_crf(), speed: ui.get_export_speed(), encoder: ui.get_export_encoder(), amd_adapter: amd_adapter(ui).ok().flatten() };
     if valid(&format) { state.borrow_mut().preferences.export_format = Some(format); }
 }
 
@@ -516,7 +522,7 @@ pub(super) fn prepare(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) 
             set_rate(ui, format.frame_rate);
             ui.set_export_crf(format.crf);
             ui.set_export_speed(format.speed);
-            ui.set_export_encoder(format.encoder);
+            ui.set_export_encoder(format.encoder);ui.set_export_container(format.container);ui.set_export_codec(format.codec);ui.set_export_backend(format.backend.clone().into());
             ui.set_export_amd_adapter(format.amd_adapter.map(|i| i.to_string()).unwrap_or_default().into());
             ui.set_export_initialized(true);
         } else {
@@ -551,3 +557,15 @@ pub(super) fn restore(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) 
     changed(ui, state);
 }
 
+
+fn capabilities(ui:&AppWindow,state:&Rc<std::cell::RefCell<AppState>>){
+ if ui.get_page()!=1{return;}let mut s=state.borrow_mut();let c=&mut s.export_form;
+ if c.capability_rx.is_none(){if let Ok(path)=playback::find_ffmpeg(){if c.capability_path.as_ref()!=Some(&path){let(tx,rx)=mpsc::channel();c.capability_path=Some(path.clone());c.capability_rx=Some(rx);std::thread::spawn(move||{let _=tx.send(crate::media_engine::encoder_names(&path));});}}}
+ if let Some(result)=c.capability_rx.as_ref().and_then(|rx|rx.try_recv().ok()){c.capability_rx=None;c.encoders=result.unwrap_or_default();c.capability_codec=None;}
+ if c.capability_codec!=Some(ui.get_export_codec()){
+  c.capability_codec=Some(ui.get_export_codec());let hevc=c.encoders.iter().any(|e|e=="libx265"||e.starts_with("hevc_"));ui.set_export_hevc_supported(hevc);
+  let codec=if ui.get_export_codec()==1{"hevc"}else{"h264"};let mut names=vec![String::new()];names.extend(c.encoders.iter().filter(|n|n.as_str()==if codec=="hevc"{"libx265"}else{"libx264"}||["nvenc","qsv","amf","videotoolbox","vaapi"].iter().any(|b|n.as_str()==format!("{codec}_{b}"))).cloned());
+  let selected=names.iter().position(|n|n==ui.get_export_backend().as_str()).unwrap_or(0);ui.set_export_backend_index(selected as i32);ui.set_export_backend(names[selected].clone().into());
+  ui.set_export_backend_options(model(names.iter().map(|name|LabelItem{text:if name.is_empty(){"Automatic · use method below".into()}else{match name.rsplit('_').next().unwrap_or(""){"nvenc"=>format!("NVIDIA · {name}"),"qsv"=>format!("Intel · {name}"),"amf"=>format!("AMD · {name}"),"vaapi"=>format!("VAAPI · {name}"),"videotoolbox"=>format!("Apple · {name}"),_=>format!("Software · {name}")}.into()}}).collect()));ui.set_export_backend_names(model(names.into_iter().map(SharedString::from).collect()));
+ }
+}

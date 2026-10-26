@@ -21,6 +21,7 @@ pub(super) struct TimelinePlan {
 }
 
 pub(super) fn plan(project: &Project, settings: &ExportSettings) -> Option<TimelinePlan> {
+    if crate::playback::precision::needed(project){return None;}
     let rate = project.sequence.frame_rate;
     if settings.force_composite || settings.frame_rate != rate || rate.num == 0
         || rate.den == 0 || rate.fps() < 1.0 { return None; }
@@ -53,7 +54,7 @@ pub(super) fn plan(project: &Project, settings: &ExportSettings) -> Option<Timel
         let b = clip_end.min(end);
         if a < cursor || clip.source_in < 0 || clip.source_time_offset != 0.0
             || clip.scale != 1.0 || clip.pos_x != 0.0 || clip.pos_y != 0.0
-            || clip.opacity != 1.0 || !clip.grade.is_identity() || !clip.transform.is_identity() { return None; }
+            || clip.opacity != 1.0 || !clip.grade.is_identity() || !clip.transform.is_identity() || !clip.creative.is_identity() { return None; }
         let media = project.media(clip.media_id)?;
         if media.kind != MediaKind::Video || !media.has_video || media.width < 2
             || media.height < 2 || !media.source_fps.is_finite()

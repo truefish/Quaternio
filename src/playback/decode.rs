@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +29,10 @@ pub fn find_ffprobe() -> Result<PathBuf, String> {
 }
 
 fn media_command(tool: &Path) -> Command {
+    #[cfg(windows)]
     let mut command = Command::new(tool);
+    #[cfg(not(windows))]
+    let command = Command::new(tool);
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     command
@@ -259,6 +262,7 @@ pub fn parse_probe(json: &str, path: &Path) -> Result<Media, String> {
         .unwrap_or("Media")
         .to_string();
     Ok(Media {
+        color: crate::color::management::Metadata{primaries:video.and_then(|v|v["color_primaries"].as_str()).unwrap_or("").into(),transfer:video.and_then(|v|v["color_transfer"].as_str()).unwrap_or("").into(),matrix:video.and_then(|v|v["color_space"].as_str()).unwrap_or("").into(),range:video.and_then(|v|v["color_range"].as_str()).unwrap_or("").into(),bit_depth:video.and_then(|v|v["bits_per_raw_sample"].as_str()).and_then(|v|v.parse().ok()).unwrap_or(0)},
         id: 0,
         name,
         bin: String::new(),
@@ -319,7 +323,7 @@ pub fn probe_path_cancellable(path: &Path, cancel: &AtomicBool) -> Result<Media,
             "-print_format".into(),
             "json".into(),
             "-show_entries".into(),
-            "format=duration,start_time:stream=index,codec_type,width,height,r_frame_rate,avg_frame_rate,nb_frames,duration,start_time:stream_disposition=attached_pic".into(),
+            "format=duration,start_time:stream=index,codec_type,width,height,r_frame_rate,avg_frame_rate,nb_frames,duration,start_time,color_primaries,color_transfer,color_space,color_range,bits_per_raw_sample:stream_disposition=attached_pic".into(),
             path.display().to_string(),
         ]);
     let output = command_output_with_deadline(
@@ -649,6 +653,7 @@ struct PreparedPictureKey {
     segment_dimensions: (u32, u32) }
 
 pub struct CachingSource {
+    precise: VecDeque<((u64,i64,u32,u32),Arc<super::precision::FloatImage>)>,
     hardware_failures: HashMap<u64, std::time::Instant>,
     media: HashMap<u64, Media>,
     cache: HashMap<(u64, i64, u32, u32), ImageBuf>,
@@ -676,6 +681,7 @@ pub struct CachingSource {
 impl CachingSource {
     pub fn new() -> Self {
         Self {
+            precise:Default::default(),
             hardware_failures: HashMap::new(),
             media: HashMap::new(),
             cache: HashMap::new(),
@@ -877,6 +883,7 @@ impl CachingSource {
             .is_some_and(|old| old != fingerprint)
         {
             self.cache.retain(|key, _| key.0 != media_id);
+            self.precise.retain(|(key,_)|key.0!=media_id);
             self.order.retain(|key| self.cache.contains_key(key));
             self.cache_bytes = self.cache.values().map(|image| image.rgb.len()).sum();
             self.sequences.retain(|seq| seq.media_id != media_id);
@@ -925,6 +932,7 @@ impl CachingSource {
         };
         // IDs can be reused by a newly opened project or by relinking media.
         self.cache.retain(|key, _| unchanged(key.0));
+        self.precise.retain(|(key,_)|unchanged(key.0));
         self.order.retain(|key| self.cache.contains_key(key));
         self.cache_bytes = self.cache.values().map(|image| image.rgb.len()).sum();
         self.sequences.retain(|seq| unchanged(seq.media_id));
@@ -943,60 +951,6 @@ impl CachingSource {
         self.media = next;
     }
 
-    pub fn ensure_audio(&mut self, media_id: u64) -> Option<&Pcm> {
-        self.ensure_audio_impl(media_id, None)
-    }
-
-    pub fn ensure_audio_cancellable(&mut self, media_id: u64, cancel: &AtomicBool) -> Option<&Pcm> {
-        self.ensure_audio_impl(media_id, Some(cancel))
-    }
-
-    fn ensure_audio_impl(&mut self, media_id: u64, cancel: Option<&AtomicBool>) -> Option<&Pcm> {
-        if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            return None;
-        }
-        if self.audio.contains_key(&media_id) {
-            return self.audio.get(&media_id);
-        }
-        let path = self.media.get(&media_id)?.path.clone();
-        let kind = self.media.get(&media_id)?.kind;
-        let has_audio = self.media.get(&media_id)?.has_audio;
-        if !has_audio || kind == MediaKind::Still {
-            self.audio.insert(
-                media_id,
-                Pcm {
-                    sample_rate: 48_000,
-                    samples: Vec::new() },
-            );
-            return self.audio.get(&media_id);
-        }
-        match decode_audio_inner(&path, cancel) {
-            Ok(pcm) => {
-                if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-                    return None;
-                }
-                self.audio.insert(media_id, pcm);
-            }
-            Err(error) => {
-                if error == "Media decode cancelled"
-                    || cancel.is_some_and(|flag| flag.load(Ordering::Acquire))
-                {
-                    // A stopped request can be retried with the same cache.
-                    return None;
-                }
-                self.decode_error.get_or_insert_with(|| {
-                    format!("Could not decode audio {}: {error}", path.display())
-                });
-                self.audio.insert(
-                    media_id,
-                    Pcm {
-                        sample_rate: 48_000,
-                        samples: Vec::new() },
-                );
-            }
-        }
-        self.audio.get(&media_id)
-    }
 
     /// Preview may display a missing frame, but export must surface the decoder
     /// failure instead of silently writing black picture or missing audio.
@@ -1006,6 +960,17 @@ impl CachingSource {
 }
 
 impl FrameSource for CachingSource {
+    fn video_float(&mut self,id:u64,time:f64,max_w:u32,max_h:u32)->Option<Arc<super::precision::FloatImage>>{
+        if self.cancelled(){return None;}
+        let media=self.media.get(&id)?.clone();if self.preview_mode{self.check_preview_fingerprint(id,&media.path);}let(w,h)=fitted_size(media.width,media.height,max_w,max_h);let fps=media.source_fps.max(1.);let mut index=if media.kind==MediaKind::Still{0}else{nearest_source_frame(time,fps)};
+        if media.kind!=MediaKind::Still{if let Ok(clock)=video_origin(&media.path,self.cancellation.as_ref().map(|g|g.flag.as_ref()),self.preview_request.as_deref()){index=clock.bounded_frame(index,fps);}}
+        let key=(id,index,w,h);if let Some((_,image))=self.precise.iter().find(|(k,_)|*k==key){return Some(image.clone());}
+        let bytes=match decode_frame_format(&media.path,index,fps,w,h,self.cancellation.as_ref().map(|g|g.flag.as_ref()),self.preview_request.as_deref(),true){Ok(v)=>v,Err(e)=>{self.decode_error.get_or_insert(e);return None;}};
+        let image=Arc::new(super::precision::FloatImage{width:w,height:h,rgb:bytes.chunks_exact(2).map(|v|u16::from_le_bytes([v[0],v[1]])as f32/65535.).collect()});
+        while self.precise.iter().map(|(_,v)|v.rgb.len()*4).sum::<usize>()+image.rgb.len()*4>96*1024*1024{if self.precise.pop_back().is_none(){break;}}
+        self.precise.push_front((key,image.clone()));Some(image)
+    }
+
     fn is_superseded(&self) -> bool {
         self.request_superseded()
     }
@@ -1491,16 +1456,6 @@ impl SeqDec {
     }
 }
 
-fn decode_frame(
-    path: &Path,
-    index: i64,
-    fps: f64,
-    w: u32,
-    h: u32,
-    cancel: Option<&AtomicBool>,
-) -> Result<Vec<u8>, String> {
-    decode_frame_with_request(path, index, fps, w, h, cancel, None)
-}
 
 fn decode_frame_with_request(
     path: &Path,
@@ -1511,6 +1466,9 @@ fn decode_frame_with_request(
     cancel: Option<&AtomicBool>,
     request: Option<&AtomicBool>,
 ) -> Result<Vec<u8>, String> {
+    decode_frame_format(path,index,fps,w,h,cancel,request,false)
+}
+fn decode_frame_format(path:&Path,index:i64,fps:f64,w:u32,h:u32,cancel:Option<&AtomicBool>,request:Option<&AtomicBool>,precise:bool)->Result<Vec<u8>,String>{
     let ffmpeg = find_ffmpeg()?;
     let timing = crate::media_engine::passthrough_args(&ffmpeg)?;
     let start = cli_frame_start(path, index, fps, cancel, request)?;
@@ -1551,7 +1509,7 @@ fn decode_frame_with_request(
         "-f".into(),
         "rawvideo".into(),
         "-pix_fmt".into(),
-        "rgb24".into(),
+        if precise{"rgb48le".into()}else{"rgb24".into()},
         "-threads".into(),
         "1".into(),
         "pipe:1".into(),
@@ -1564,7 +1522,7 @@ fn decode_frame_with_request(
     require_decode_success(&output, "video", path)?;
     let expected = (w as usize)
         .checked_mul(h as usize)
-        .and_then(|pixels| pixels.checked_mul(3))
+        .and_then(|pixels| pixels.checked_mul(if precise{6}else{3}))
         .ok_or("Requested frame dimensions exceed the supported buffer size")?;
     if output.stdout.len() != expected {
         return Err(format!(
@@ -1576,56 +1534,6 @@ fn decode_frame_with_request(
     Ok(output.stdout)
 }
 
-pub fn decode_audio(path: &Path) -> Result<Pcm, String> {
-    decode_audio_inner(path, None)
-}
-
-
-
-fn decode_audio_inner(path: &Path, cancel: Option<&AtomicBool>) -> Result<Pcm, String> {
-    let ffmpeg = find_ffmpeg()?;
-    let args = [
-        "-nostdin".into(),
-        "-hide_banner".into(),
-        "-loglevel".into(),
-        "error".into(),
-        "-xerror".into(),
-        "-i".into(),
-        path.display().to_string(),
-        "-vn".into(),
-        "-ac".into(),
-        "2".into(),
-        "-ar".into(),
-        "48000".into(),
-        "-f".into(),
-        "f32le".into(),
-        "pipe:1".into(),
-    ];
-    let output = match cancel {
-        Some(cancel) => command_output_cancellable(&ffmpeg, &args, cancel),
-        None => command_output(&ffmpeg, &args) }?;
-    require_decode_success(&output, "audio", path)?;
-    if output.stdout.is_empty() || output.stdout.len() % 8 != 0 {
-        return Err(format!(
-            "FFmpeg returned incomplete stereo PCM from {} ({} bytes)",
-            path.display(),
-            output.stdout.len()
-        ));
-    }
-    let mut samples = Vec::with_capacity(output.stdout.len() / 4);
-    for (index, chunk) in output.stdout.chunks_exact(4).enumerate() {
-        if index % 8192 == 0 && cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            return Err("Media decode cancelled".into());
-        }
-        samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-        return Err("Media decode cancelled".into());
-    }
-    Ok(Pcm {
-        sample_rate: 48_000,
-        samples })
-}
 
 /// Preview-only bounded PCM. AAC input seeks can begin at the next packet,
 /// so align the decoder's timestamp origin before resampling/trimming. A full
@@ -1679,7 +1587,4 @@ pub(crate) fn decode_audio_window(
     Ok(Pcm {
         sample_rate: 48_000,
         samples })
-}
-pub fn write_rgb_pipe(stdin: &mut impl Write, rgb: &[u8]) -> Result<(), String> {
-    stdin.write_all(rgb).map_err(|err| err.to_string())
 }

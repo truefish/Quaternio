@@ -1,7 +1,7 @@
 #[path = "native_eligibility.rs"]
 mod native_eligibility;
 pub use native_eligibility::Eligibility as PreviewTimingService;
-pub use native_eligibility::{prepare_index, set_busy as set_index_busy};
+pub use native_eligibility::set_busy as set_index_busy;
 // Isolated preview decoder. Never used by the export source by default.
 use serde::{Deserialize, Serialize};
 use std::{

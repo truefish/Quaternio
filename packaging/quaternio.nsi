@@ -1,4 +1,5 @@
 Unicode True
+SetCompressor /SOLID lzma
 !include "MUI2.nsh"
 !ifndef APP_VERSION
   !define APP_VERSION "development"
@@ -21,6 +22,8 @@ Section "Quaternio"
   SetOutPath "$INSTDIR"
   File "stage\quaternio.exe"
   File "stage\LICENSE"
+  File "stage\whisper-MIT.txt"
+  File "stage\Inter-OFL.txt"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -41,6 +44,8 @@ SectionEnd
 Section "Uninstall"
   Delete "$INSTDIR\quaternio.exe"
   Delete "$INSTDIR\LICENSE"
+  Delete "$INSTDIR\whisper-MIT.txt"
+  Delete "$INSTDIR\Inter-OFL.txt"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$SMPROGRAMS\Quaternio\Quaternio.lnk"
   Delete "$SMPROGRAMS\Quaternio\Uninstall Quaternio.lnk"

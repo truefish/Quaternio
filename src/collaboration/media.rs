@@ -7,11 +7,11 @@ use base64::{Engine,engine::general_purpose::STANDARD};
 use crate::{project::{Project,Media,MediaKind,TrackKind,Clip},playback::{self,PreviewEngine,ImageBuf}};
 
 #[derive(Clone,Debug,Serialize,Deserialize,PartialEq)]
-pub struct Request{#[serde(default)]pub view:u8,pub id:u64,pub revision:u64,pub source:Option<u64>,pub frame:i64,pub width:u32,pub height:u32,pub audio_frames:u32,pub playing:bool,pub speed:f64}
+pub struct Request{#[serde(default="crate::project::sequences::main_id")]pub sequence:String,#[serde(default)]pub view:u8,pub id:u64,pub revision:u64,pub source:Option<u64>,pub frame:i64,pub width:u32,pub height:u32,pub audio_frames:u32,pub playing:bool,pub speed:f64}
 impl Request{
     pub fn validate(&self,project:&Project)->Result<(),String>{
         if self.view>3||(self.view==0)!=self.source.is_none()||self.view>=2&&(self.playing||self.audio_frames!=0)||!self.speed.is_finite()||self.speed.abs()>8.||self.playing&&self.speed==0.||self.width<2||self.height<2||self.width>1280||self.height>720||self.frame<0||self.frame>i32::MAX as i64{return Err("Invalid preview dimensions or time".into());}
-        let rate=if let Some(id)=self.source{project.media(id).ok_or("Unknown source media")?.source_rate()}else{project.sequence.frame_rate};
+        let rate=if let Some(id)=self.source{project.media(id).ok_or("Unknown source media")?.source_rate()}else{project.sequence_by_id(&self.sequence).ok_or("Unknown preview sequence")?.frame_rate};
         if self.audio_frames>rate.fps().ceil().min(240.)as u32{return Err("Preview audio interval is too large".into());}
         Ok(())
     }
@@ -47,8 +47,8 @@ impl Renderer{
             let preview=PreviewEngine::new_cancellable(cancel.clone());let mut key=None;let mut audio_cache=HashMap::new();
             while !cancel.load(Ordering::Acquire){
                 let job={let(mut guard,ready)=(shared.0.lock().unwrap(),&shared.1);while guard.job.is_none()&&!guard.stop{guard=ready.wait(guard).unwrap();}if guard.stop{break;}guard.job.take().unwrap()};
-                let started=Instant::now();let request=job.request;let project=if let Some(id)=request.source{let Some(media)=job.project.media(id)else{continue;};Arc::new(source_project(media))}else{job.project.clone()};
-                if key.as_ref().is_none_or(|(previous,revision,source):&(Arc<Project>,u64,Option<u64>)|!Arc::ptr_eq(previous,&job.project)||*revision!=request.revision||*source!=request.source){preview.set_project((*project).clone());audio_cache.clear();key=Some((job.project.clone(),request.revision,request.source));}
+                let started=Instant::now();let request=job.request;let project=if let Some(id)=request.source{let Some(media)=job.project.media(id)else{continue;};Arc::new(source_project(media))}else{let mut p=(*job.project).clone();if p.switch_sequence(&request.sequence).is_err(){continue;}Arc::new(p)};
+                if key.as_ref().is_none_or(|(previous,revision,source,sequence):&(Arc<Project>,u64,Option<u64>,String)|!Arc::ptr_eq(previous,&job.project)||*revision!=request.revision||*source!=request.source||*sequence!=request.sequence){preview.set_project((*project).clone());audio_cache.clear();key=Some((job.project.clone(),request.revision,request.source,request.sequence.clone()));}
                 let token=preview.request_scrub(request.frame,request.width,request.height);let deadline=Instant::now()+Duration::from_secs(15);
                 let image=loop{
                     if cancel.load(Ordering::Acquire)||shared.0.lock().unwrap().job.is_some(){break None;}
@@ -60,7 +60,8 @@ impl Renderer{
                 let mut sound=Vec::new();
                 if error.is_none()&&request.audio_frames>0{
                     let mut buffers=playback::WindowBuffers::new();
-                    for(id,block)in playback::required_audio_windows(&project,request.frame,request.audio_frames as i64){
+                    let needed=match playback::required_audio_windows_checked(&project,request.frame,request.audio_frames as i64,&cancel){Ok(needed)=>needed,Err(e)=>{error=Some(e);Default::default()}};
+                    for(id,block)in needed{
                         let Some(media)=project.media(id)else{continue;};let cache_key=(media.path.clone(),block);
                         if !audio_cache.contains_key(&cache_key){
                             if audio_cache.len()>=16{audio_cache.clear();}
@@ -68,7 +69,7 @@ impl Renderer{
                         }
                         if let Some(window)=audio_cache.get(&cache_key){buffers.entry(id).or_default().push(window.clone());}
                     }
-                    if error.is_none(){for sample in playback::mix_window_range(&project,request.frame,request.audio_frames as i64,&buffers){sound.extend_from_slice(&((sample.clamp(-1.,1.)*32767.)as i16).to_le_bytes());}}
+                    if error.is_none(){match playback::mix_window_range_checked(&project,request.frame,request.audio_frames as i64,&buffers,&cancel){Ok(samples)=>for sample in samples{sound.extend_from_slice(&((sample.clamp(-1.,1.)*32767.)as i16).to_le_bytes());},Err(e)=>error=Some(e)}}
                 }
                 // Never disclose host filenames in remote decoder diagnostics.
                 if error.is_some(){error=Some("The host could not render this preview. Check media availability on the host.".into());}
@@ -93,7 +94,7 @@ pub fn source_project(media:&Media)->Project{
     let mut project=Project::new_default("Source");project.sequence.width=media.width.max(16);project.sequence.height=media.height.max(16);project.sequence.frame_rate=media.source_rate();project.sequence.tracks.clear();
     let media_id=project.add_media(media.clone());
     for kind in [TrackKind::Video,TrackKind::Audio]{if !(if kind==TrackKind::Video{media.has_video||media.kind==MediaKind::Still}else{media.has_audio}){continue;}
-        let track=project.add_track(kind);let id=project.alloc();project.sequence.tracks[track].clips.push(Clip{transform:Default::default(),id,media_id,name:media.name.clone(),timeline_start:0,duration:media.source_frames(),source_in:0,source_time_offset:0.,link:None,volume:1.,pos_x:0.,pos_y:0.,scale:1.,opacity:1.,grade:Default::default()});}
+        let track=project.add_track(kind);let id=project.alloc();project.sequence.tracks[track].clips.push(Clip{creative:Default::default(),transform:Default::default(),id,media_id,name:media.name.clone(),timeline_start:0,duration:media.source_frames(),source_in:0,source_time_offset:0.,link:None,volume:1.,pos_x:0.,pos_y:0.,scale:1.,opacity:1.,grade:Default::default()});}
     project.ensure_integrity();project
 }
 
@@ -120,34 +121,31 @@ pub struct WaveRequest{pub id:u64,pub revision:u64,pub clip:u64,pub offset:f64,p
 pub struct WavePacket{pub request:WaveRequest,pub peaks:Vec<[f32;2]>}
 #[derive(Serialize,Deserialize)]
 pub enum Message{Picture(Packet),Waveform(WavePacket)}
-struct WaveJob{peer:String,media:Media,request:WaveRequest}
+struct WaveJob{peer:String,media:Media,clip:crate::project::Clip,rate:crate::project::FrameRate,request:WaveRequest}
 pub struct Waveforms{engine:playback::timeline_waveforms::WaveformEngine,pending:Vec<WaveJob>,cache:std::collections::VecDeque<(Media,Arc<playback::timeline_waveforms::WaveformPeaks>)>,ready:Vec<(String,WavePacket)>}
 impl Waveforms{
     pub fn new()->Self{Self{engine:playback::timeline_waveforms::WaveformEngine::new(),pending:Vec::new(),cache:Default::default(),ready:Vec::new()}}
-    fn packet(request:WaveRequest,media:&Media,peaks:&playback::timeline_waveforms::WaveformPeaks)->WavePacket{
-        let start=request.offset;let end=(start+request.seconds).min(media.source_duration_seconds());
+    fn packet(request:WaveRequest,clip:&crate::project::Clip,rate:crate::project::FrameRate,peaks:&playback::timeline_waveforms::WaveformPeaks)->WavePacket{
         let mut merged=vec![[0f32;2];request.columns as usize];
-        for channel in 0..peaks.channels{for(dst,source)in merged.iter_mut().zip(peaks.columns(channel,start,end,request.columns as usize)){dst[0]=dst[0].min(source.min);dst[1]=dst[1].max(source.max);}}
+        for channel in 0..peaks.channels{for(dst,source)in merged.iter_mut().zip(peaks.clip_columns(clip,rate,channel,request.offset,request.seconds,request.columns as usize)){dst[0]=dst[0].min(source.min);dst[1]=dst[1].max(source.max);}}
         WavePacket{request,peaks:merged}
     }
-    pub fn submit(&mut self,peer:&str,project:&Project,mut request:WaveRequest)->Result<(),String>{
+    pub fn submit(&mut self,peer:&str,project:&Project,request:WaveRequest)->Result<(),String>{
         if !request.offset.is_finite()||!request.seconds.is_finite()||request.offset<0.||request.seconds<=0.||request.columns==0||request.columns>1024{return Err("Invalid waveform interval".into());}
-        let clip=project.clip(request.clip).ok_or("Unknown waveform clip")?;let rate=project.sequence.frame_rate;
+        let (sequence,clip)=project.all_sequences().find_map(|(_,s)|s.tracks.iter().flat_map(|t|&t.clips).find(|c|c.id==request.clip).map(|c|(s,c))).ok_or("Unknown waveform clip")?;let rate=sequence.frame_rate;
         if request.offset+request.seconds>rate.frame_to_seconds(clip.duration)+0.1{return Err("Waveform interval exceeds clip".into());}
         let media=project.media(clip.media_id).ok_or("Unknown waveform media")?;if !media.has_audio{return Ok(());}
-        // Convert a clip-relative interval to source time on the host.
-        request.offset+=clip.source_start_seconds(rate);
-        if let Some((_,peaks))=self.cache.iter().find(|(old,_)|old.id==media.id&&old.path==media.path&&old.duration_secs==media.duration_secs){self.ready.push((peer.into(),Self::packet(request,media,peaks)));return Ok(());}
+        if let Some((_,peaks))=self.cache.iter().find(|(old,_)|old.id==media.id&&old.path==media.path&&old.duration_secs==media.duration_secs){self.ready.push((peer.into(),Self::packet(request,clip,rate,peaks)));return Ok(());}
         self.pending.retain(|job|job.peer!=peer||job.request.clip!=request.clip);
         if self.pending.len()>=112{return Err("Waveform request queue is full".into());}
-        self.engine.request(media.clone());self.pending.push(WaveJob{peer:peer.into(),media:media.clone(),request});Ok(())
+        self.engine.request(media.clone());self.pending.push(WaveJob{peer:peer.into(),media:media.clone(),clip:clip.clone(),rate,request});Ok(())
     }
     pub fn poll(&mut self)->Vec<(String,WavePacket)>{
         while let Some(result)=self.engine.poll(){
-            let jobs:Vec<_>=self.pending.iter().filter(|job|job.media.id==result.media.id&&job.media.path==result.media.path).map(|job|(job.peer.clone(),job.request.clone(),job.media.clone())).collect();
+            let jobs:Vec<_>=self.pending.iter().filter(|job|job.media.id==result.media.id&&job.media.path==result.media.path).map(|job|(job.peer.clone(),job.request.clone(),job.clip.clone(),job.rate)).collect();
             self.pending.retain(|job|job.media.id!=result.media.id||job.media.path!=result.media.path);
             if let Ok(peaks)=result.peaks{
-                for(peer,request,media)in jobs{self.ready.push((peer,Self::packet(request,&media,&peaks)));}
+                for(peer,request,clip,rate)in jobs{self.ready.push((peer,Self::packet(request,&clip,rate,&peaks)));}
                 self.cache.retain(|(media,_)|media.id!=result.media.id);
                 while self.cache.len()>=16||self.cache.iter().map(|(_,p)|p.bytes()).sum::<usize>()+peaks.bytes()>8_000_000{if self.cache.pop_back().is_none(){break;}}
                 self.cache.push_front((result.media,peaks));

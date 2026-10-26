@@ -14,12 +14,13 @@ fn audio_only_delta(before: &Project, after: &Project) -> bool {
         let mut picture = project.clone();
         picture.next_id = 0;
         picture.sequence.playhead = 0;
+        picture.sequence.audio=Default::default();
         for track in &mut picture.sequence.tracks {
-            track.gain = 1.0;
+            track.gain = 1.0;track.role=Default::default();
             track.pan = 0.0;
             track.solo = false;
             if track.kind == TrackKind::Audio { track.muted = false; }
-            for clip in &mut track.clips { clip.volume = 1.0; }
+            for clip in &mut track.clips { clip.volume = 1.0;clip.creative.dialogue=false;clip.creative.animation.remove("volume"); }
         }
         picture.sequence.transitions.retain(|transition| !transition.kind.is_audio());
         picture

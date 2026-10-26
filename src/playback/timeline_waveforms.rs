@@ -40,6 +40,15 @@ pub struct WaveformPeaks {
     pub sample_frames: u64,
     pub levels: Vec<PeakLevel> }
 impl WaveformPeaks {
+    pub fn clip_columns(&self, clip: &crate::project::Clip, rate: crate::project::FrameRate, channel: usize, offset: f64, seconds: f64, count: usize) -> Vec<Peak> {
+        if clip.creative.freeze { return vec![Peak::default(); count.min(4096)]; }
+        let start = clip.source_start_seconds(rate) + offset * clip.creative.speed;
+        let end = start + seconds * clip.creative.speed;
+        let mut columns = self.columns(channel, start.min(end), start.max(end), count);
+        if clip.creative.speed < 0. { columns.reverse(); }
+        columns
+    }
+
     pub fn bytes(&self) -> usize {
         self.levels.iter().map(|l| l.peaks.len() * std::mem::size_of::<Peak>()).sum()
     }

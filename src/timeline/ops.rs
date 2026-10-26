@@ -4,7 +4,7 @@ use crate::color::Grade;
 use crate::project::{
     Anchor, Clip, MediaKind, Project, SourceRange, TrackKind, Transition, TransitionKind };
 
-use super::layout::{snap_delta, Edge};
+use super::layout::Edge;
 
 #[derive(Clone, Debug)]
 pub struct Placement {
@@ -31,6 +31,9 @@ pub fn cleanup(project: &mut Project) {
         .collect();
     project.sequence.transitions.retain(|transition| {
         transition.duration >= 1 && ids.contains(&transition.anchor.clip_id())
+            && (!matches!(transition.anchor, Anchor::Cut(_)) || project.sequence.tracks.iter().any(|track| {
+                track.clips.iter().find(|c| c.id == transition.anchor.clip_id()).is_some_and(|c| track.clips.iter().any(|next| next.id != c.id && next.timeline_start == c.end()))
+            }))
     });
     let caps: Vec<(usize, i64)> = project
         .sequence
@@ -67,7 +70,7 @@ fn incoming_duration(project: &Project, outgoing: &Clip) -> Option<i64> {
     project.sequence.tracks[track_index]
         .clips
         .iter()
-        .filter(|clip| clip.id != outgoing.id && clip.timeline_start >= outgoing.end() - 1)
+        .filter(|clip| clip.id != outgoing.id && clip.timeline_start == outgoing.end())
         .min_by_key(|clip| clip.timeline_start)
         .map(|clip| clip.duration)
 }
@@ -126,7 +129,7 @@ pub fn plan_placements_in_range(
     media.validate_source_range(range)?;
     let source = range.placement(project.sequence.frame_rate)?;
     let mut items = Vec::new();
-    if media.has_video || media.kind == MediaKind::Still {
+    if (media.has_video || media.kind == MediaKind::Still) && project.sequence.targeting.patch_video {
         let track = target_track(project, TrackKind::Video, selected_track)?;
         items.push(Placement {
             media_id,
@@ -137,7 +140,7 @@ pub fn plan_placements_in_range(
             name: media.name.clone(),
             link: None });
     }
-    if media.has_audio {
+    if media.has_audio && project.sequence.targeting.patch_audio {
         let track = target_track(project, TrackKind::Audio, selected_track)?;
         items.push(Placement {
             media_id,
@@ -149,7 +152,7 @@ pub fn plan_placements_in_range(
             link: None });
     }
     if items.is_empty() {
-        return Err("This media has no picture or sound".into());
+        return Err("Enable picture or audio in Source destinations to insert this media".into());
     }
     Ok(items)
 }
@@ -159,6 +162,11 @@ fn target_track(
     kind: TrackKind,
     selected: Option<usize>,
 ) -> Result<usize, String> {
+    let explicit=if kind==TrackKind::Video{project.sequence.targeting.video}else{project.sequence.targeting.audio};
+    if let Some(id)=explicit {
+        let index=project.sequence.tracks.iter().position(|t|t.id==id&&t.kind==kind).ok_or("The source destination track was removed; choose another destination")?;
+        if project.sequence.tracks[index].locked{return Err("The source destination is locked".into());}return Ok(index);
+    }
     if let Some(index) = selected {
         if let Some(track) = project.sequence.tracks.get(index) {
             if track.kind == kind {
@@ -184,6 +192,7 @@ fn target_track(
 
 fn make_clip(project: &mut Project, item: &Placement, at: i64) -> Clip {
     Clip {
+        creative: Default::default(),
         transform: Default::default(),
         id: project.alloc(),
         media_id: item.media_id,
@@ -221,6 +230,13 @@ pub fn insert_placements(
         }
     }
     let mut split_links = HashMap::new();
+    let duration=items.iter().map(|i|i.duration).max().unwrap_or(0);
+    for i in 0..project.sequence.tracks.len(){
+        if !items.iter().any(|item|item.track==i)&&project.sequence.tracks[i].sync_lock{
+            if project.sequence.tracks[i].locked&&project.sequence.tracks[i].clips.iter().any(|c|c.end()>at){return Err(format!("{} is locked and sync-locked",project.sequence.tracks[i].name));}
+        }
+    }
+    for i in 0..project.sequence.tracks.len(){if !items.iter().any(|item|item.track==i)&&project.sequence.tracks[i].sync_lock{split_track_at(project,i,at,&mut split_links);for c in &mut project.sequence.tracks[i].clips{if c.timeline_start>=at{c.timeline_start+=duration;}}}}
     for item in items {
         split_track_at(project, item.track, at, &mut split_links);
         let duration = item.duration.max(1);
@@ -254,13 +270,6 @@ pub fn overwrite_placements(
     Ok(())
 }
 
-pub fn overwrite_clip(
-    project: &mut Project,
-    track_index: usize,
-    new_clip: Clip,
-) -> Result<(), String> {
-    overwrite_clip_with_links(project, track_index, new_clip, &mut HashMap::new())
-}
 
 fn overwrite_clip_with_links(
     project: &mut Project,
@@ -290,8 +299,15 @@ fn overwrite_clip_with_links(
     Ok(())
 }
 
-pub fn clear_range(project: &mut Project, track_index: usize, start: i64, end: i64, keep: &[u64]) {
-    clear_range_with_links(project, track_index, start, end, keep, &mut HashMap::new());
+
+/// Remove a spoken passage across all lanes while preserving linked split IDs.
+pub fn extract_range(project:&mut Project,start:i64,end:i64)->Result<(),String>{
+    if start<0||end<=start{return Err("Choose a nonempty passage".into());}
+    if project.sequence.tracks.iter().any(|t|t.locked&&t.clips.iter().any(|c|c.end()>start)){return Err("Unlock affected tracks before removing a passage".into());}
+    let mut links=HashMap::new();
+    for i in 0..project.sequence.tracks.len(){clear_range_with_links(project,i,start,end,&[],&mut links);for c in &mut project.sequence.tracks[i].clips{if c.timeline_start>=end{c.timeline_start-=end-start;}}}
+    for note in &mut project.review_notes{note.frame=if note.frame>=end{note.frame-(end-start)}else{note.frame.min(start)};}
+    project.sequence.playhead=start;project.sequence.in_point=None;project.sequence.out_point=None;cleanup(project);Ok(())
 }
 
 fn clear_range_with_links(
@@ -320,7 +336,7 @@ fn clear_range_with_links(
             let trimmed = end - clip.timeline_start;
             right.id = project.alloc();
             right.link = split_right_link(project, right.link, end, split_links);
-            right.source_in += trimmed;
+            right.advance_source(trimmed, project.sequence.frame_rate);
             right.duration -= trimmed;
             right.timeline_start = end;
             retarget_split(project, old_id, left.id, right.id);
@@ -345,7 +361,7 @@ fn clear_range_with_links(
         if clip.end() > end {
             let mut right = clip;
             let trimmed = end - right.timeline_start;
-            right.source_in += trimmed;
+            right.advance_source(trimmed, project.sequence.frame_rate);
             right.duration -= trimmed;
             right.timeline_start = end;
             drop_head_transitions(project, old_id);
@@ -362,6 +378,7 @@ fn clear_range_with_links(
 }
 
 fn source_ok(project: &Project, clip: &Clip) -> bool {
+    if clip.creative.text.is_some(){return true;}
     let Some(media) = project.media(clip.media_id) else {
         return clip.duration >= 1;
     };
@@ -423,7 +440,7 @@ fn split_track_at(
             right.id = project.alloc();
             right.link = split_right_link(project, right.link, frame, split_links);
             right.timeline_start = frame;
-            right.source_in += left_dur;
+            right.advance_source(left_dur, project.sequence.frame_rate);
             right.duration -= left_dur;
             retarget_split(project, old, left.id, right.id);
             next.push(left);
@@ -753,68 +770,6 @@ pub fn ripple_delete(project: &mut Project, ids: &[u64]) -> Result<(), String> {
     Ok(())
 }
 
-pub fn resolve_moved(project: &mut Project, ids: &[u64]) {
-    let moved = expand_links(project, ids);
-    let ranges: Vec<(usize, i64, i64)> = moved
-        .iter()
-        .filter_map(|id| {
-            let clip = project.clip(*id)?;
-            let track = project.track_index_of_clip(*id)?;
-            Some((track, clip.timeline_start, clip.end()))
-        })
-        .collect();
-    let mut split_links = HashMap::new();
-    for (track, start, end) in ranges {
-        if project
-            .sequence
-            .tracks
-            .get(track)
-            .map(|track| track.locked)
-            .unwrap_or(true)
-        {
-            continue;
-        }
-        clear_range_with_links(project, track, start, end, &moved, &mut split_links);
-    }
-    cleanup(project);
-}
-
-pub fn shift_to(project: &mut Project, originals: &[(u64, i64)], delta: i64) -> i64 {
-    let min_start = originals.iter().map(|(_, start)| *start).min().unwrap_or(0);
-    let delta = delta.max(-min_start);
-    for (id, start) in originals {
-        if let Some(clip) = project.clip_mut(*id) {
-            clip.timeline_start = *start + delta;
-        }
-    }
-    delta
-}
-
-pub fn try_trim_in(project: &mut Project, id: u64, new_start: i64, ripple: bool) -> bool {
-    let Some(delta) = project
-        .clip(id)
-        .and_then(|clip| new_start.max(0).checked_sub(clip.timeline_start))
-    else {
-        return false;
-    };
-    try_trim_group(project, &[id], Edge::In, delta, ripple)
-}
-
-pub fn try_trim_out(project: &mut Project, id: u64, new_end: i64, ripple: bool) -> bool {
-    let Some(delta) = project
-        .clip(id)
-        .and_then(|clip| new_end.checked_sub(clip.end()))
-    else {
-        return false;
-    };
-    try_trim_group(project, &[id], Edge::Out, delta, ripple)
-}
-
-/// Apply one edge delta to a linked set after validating every source and track.
-/// No clip changes when one member lacks handles or belongs to a locked track.
-pub fn try_trim_group(project: &mut Project, ids: &[u64], edge: Edge, delta: i64, ripple: bool) -> bool {
-    trim_group_checked(project, ids, edge, delta, ripple).is_ok()
-}
 
 pub fn trim_group_checked(
     project: &mut Project,
@@ -852,7 +807,8 @@ pub fn trim_group_checked(
                 let Some(duration) = original.duration.checked_sub(delta) else {
                     return Err("Trim exceeds the timeline range".into());
                 };
-                trimmed.source_in = source_in;
+                let _ = source_in;
+                trimmed.advance_source(delta, project.sequence.frame_rate);
                 trimmed.duration = duration;
                 if !ripple {
                     let Some(start) = original.timeline_start.checked_add(delta) else {
@@ -1183,6 +1139,9 @@ pub fn add_transition(
     if !kind.is_audio() && !video_track {
         return Err("Video transitions go on a video clip".into());
     }
+    if kind.is_cut() && !track.clips.iter().any(|c| c.id != clip_id && c.timeline_start == clip.end()) {
+        return Err("A dissolve needs an adjacent clip after this one. Use a fade across a gap.".into());
+    }
     let anchor = if kind.is_cut() {
         Anchor::Cut(clip_id)
     } else if matches!(kind, TransitionKind::FadeIn | TransitionKind::AudioFadeIn) {
@@ -1231,7 +1190,17 @@ pub fn remove_transition(project: &mut Project, id: u64) {
         .retain(|transition| transition.id != id);
 }
 
-pub fn apply_snap(sequence_edges: &[i64], targets: &[i64], threshold_frames: i64) -> i64 {
-    snap_delta(sequence_edges, targets, threshold_frames)
-}
 
+
+/// One-frame precision edits. Call within Editor::edit so any linked failure rolls back.
+pub(crate) fn precision(project:&mut Project,ids:&[u64],mode:&str,delta:i64)->Result<(),String>{
+ if !matches!(mode,"slip"|"roll"|"slide"){return Err("Unknown precision tool".into());}
+ validate_unlocked(project,ids)?;let rate=project.sequence.frame_rate;let mut edited=Vec::new();
+ for id in ids{let c=project.clip(*id).ok_or("Clip missing")?.clone();let track=project.track_index_of_clip(*id).unwrap();
+  if mode=="slip"{let mut next=c.clone();let offset=next.creative.offset;next.advance_source(delta,rate);next.creative.offset=offset;if !source_ok(project,&next){return Err("Slip reaches the source limit".into());}edited.push(next);continue;}
+  let next=project.sequence.tracks[track].clips.iter().find(|v|v.id!=c.id&&v.timeline_start==c.end()).cloned();
+  if mode=="roll"{let mut a=c.clone();let mut b=next.ok_or("Rolling needs an adjacent clip after the selection")?;a.duration+=delta;b.timeline_start+=delta;b.duration-=delta;b.advance_source(delta,rate);if a.duration<1||b.duration<1||!source_ok(project,&a)||!source_ok(project,&b){return Err("Roll reaches the source limit".into());}edited.extend([a,b]);
+  }else{let mut a=project.sequence.tracks[track].clips.iter().find(|v|v.id!=c.id&&v.end()==c.timeline_start).cloned().ok_or("Sliding needs adjacent clips on both sides")?;let mut b=next.ok_or("Sliding needs adjacent clips on both sides")?;let mut middle=c.clone();a.duration+=delta;middle.timeline_start+=delta;b.timeline_start+=delta;b.duration-=delta;b.advance_source(delta,rate);if a.duration<1||b.duration<1||middle.timeline_start<0||!source_ok(project,&a)||!source_ok(project,&b){return Err("Slide reaches the source limit".into());}edited.extend([a,middle,b]);}
+ }
+ for c in edited{let id=c.id;*project.clip_mut(id).ok_or("Clip missing")?=c;}Ok(())
+}

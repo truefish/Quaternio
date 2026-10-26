@@ -77,7 +77,7 @@ pub(super) fn parse(xml: &str, xml_dir: &Path) -> Result<(Project, ImportReport)
                         Ok(Some(asset)) => asset,
                         result => {
                             if let Err(error) = result { report.skipped.push(format!("'{name}': probe failed; retained metadata: {error}")); }
-                            Media { id: 0, name: text_of(file, "name", &name).to_owned(), bin: String::new(), path: path.clone(),
+                            Media { color:Default::default(), id: 0, name: text_of(file, "name", &name).to_owned(), bin: String::new(), path: path.clone(),
                                 kind: if video.is_some() || kind == TrackKind::Video { MediaKind::Video } else { MediaKind::Audio },
                                 duration_secs: duration.max(source_seconds + seq_rate.frame_to_seconds(end - start)),
                                 width: sample.and_then(|n| integer(n, "width")).unwrap_or(1920).clamp(0, 16384) as u32,
@@ -108,7 +108,7 @@ pub(super) fn parse(xml: &str, xml_dir: &Path) -> Result<(Project, ImportReport)
                     }
                 }
                 let source_frame = seq_rate.seconds_to_frame(source_seconds);
-                project.sequence.tracks[index].clips.push(Clip { id: clip_id, media_id: id, name: name.clone(), timeline_start: start,
+                project.sequence.tracks[index].clips.push(Clip { creative: Default::default(), id: clip_id, media_id: id, name: name.clone(), timeline_start: start,
                     transform: Default::default(),
                     duration: end - start, source_in: source_frame, source_time_offset: source_seconds - seq_rate.frame_to_seconds(source_frame),
                     link: None, volume: 1.0, pos_x: 0.0, pos_y: 0.0, scale: 1.0, opacity: 1.0, grade: Grade::default() });

@@ -77,8 +77,6 @@ pub enum ExportStage {
     AudioPreparation,
     Composition,
     PipeWrite,
-    Startup,
-    Decode,
     Encode,
     Finalization,
 }
@@ -92,8 +90,6 @@ impl ExportDiagnostics {
             ExportStage::AudioPreparation => &mut self.timings.audio_preparation_seconds,
             ExportStage::Composition => &mut self.timings.decode_and_composition_seconds,
             ExportStage::PipeWrite => &mut self.timings.pipe_write_seconds,
-            ExportStage::Startup => &mut self.timings.startup_seconds,
-            ExportStage::Decode => &mut self.timings.decode_seconds,
             ExportStage::Encode => &mut self.timings.encode_seconds,
             ExportStage::Finalization => &mut self.timings.finalization_seconds,
         };

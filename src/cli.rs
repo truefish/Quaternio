@@ -147,7 +147,7 @@ pub fn run_if_requested() -> Result<bool, String> {
 }
 
 fn render(request: &Request, project: &Project, report: &mut RenderReport) -> Result<(), String> {
-    let settings = ExportSettings {
+    let settings = ExportSettings { burn_captions:true,delivery:Default::default(),backend:None,
         speed: request.speed.clone(),
         width: request.width.unwrap_or(project.sequence.width).max(16) & !1,
         height: request.height.unwrap_or(project.sequence.height).max(16) & !1,

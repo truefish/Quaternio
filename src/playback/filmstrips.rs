@@ -54,7 +54,6 @@ fn ordinal_at(seconds: f64, fps: f64) -> i64 {
 pub struct FilmstripSample {
     /// Cell left edge in absolute sequence frames; can precede visible_start.
     pub timeline_frame: i64,
-    pub source_seconds: f64,
     pub request: FilmstripRequest }
 
 /// Visible interval is half-open. Grid is anchored to clip start, so scrolling
@@ -124,7 +123,6 @@ pub fn plan_visible(
         }
         samples.push(FilmstripSample {
             timeline_frame: frame,
-            source_seconds: seconds,
             request });
         let next = cell.saturating_add(frames_per_cell);
         if next <= cell {

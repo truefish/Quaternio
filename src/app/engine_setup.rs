@@ -32,9 +32,25 @@ fn start(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>,
     std::thread::spawn(move || { let result = work(cancel, tx.clone()); let _ = tx.send(Event::Done(result)); });
 }
 
+const PREFERENCES_TAB: i32 = 5;
+
+pub(super) fn open(ui: &AppWindow) {
+    ui.set_preferences_tab(PREFERENCES_TAB);
+    ui.set_open_menu(0);
+    ui.set_show_command_palette(false);
+    ui.set_show_prefs(true);
+}
+
+fn close(ui: &AppWindow) {
+    if ui.get_preferences_tab() == PREFERENCES_TAB {
+        ui.set_show_prefs(false);
+        ui.invoke_focus_pane(focused_panel(ui));
+    }
+}
+
 pub(super) fn require(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) -> bool {
     if state.borrow().engine_setup.ready { return true; }
-    ui.set_show_engine_setup(true);
+    open(ui);
     false
 }
 
@@ -46,8 +62,8 @@ pub(super) fn handle(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>, c
             let mut current = state.borrow_mut(); current.preferences.preview_hardware = enabled;
             if let Err(error) = current.preferences.save() { current.status = format!("Preferences: {error}"); }
         },
-        "engine-setup" => ui.set_show_engine_setup(true),
-        "engine-close" => ui.set_show_engine_setup(false),
+        "engine-setup" => open(ui),
+        "engine-close" => close(ui),
         "engine-cancel" => { state.borrow().engine_setup.cancel.store(true, Ordering::Release); ui.set_engine_status("Cancelling setup…".into()); },
         "engine-check" => check(ui, state),
         "engine-install" => start(ui, state, |cancel, tx| media_engine::install(&cancel, None, |message| { let _ = tx.send(Event::Progress(message)); })),
@@ -80,12 +96,12 @@ pub(super) fn pump(ui: &AppWindow, state: &Rc<std::cell::RefCell<AppState>>) {
                         state.borrow_mut().engine_setup.ready = true;
                         ui.set_engine_ready(true);
                         ui.set_engine_status("Media engine ready".into());
-                        ui.set_engine_details(format!("FFmpeg {}\n{}\nGPU encoding is checked when you export.", engine.version, engine.ffmpeg.display()).into());
+                        ui.set_engine_details(format!("FFmpeg {}\n{}", engine.version, engine.ffmpeg.display()).into());
                         // Invalidate failed requests made while tools were absent.
                         state.borrow_mut().source_requested = None;
                         state.borrow_mut().shown_frame = -1;
                         let paths = std::mem::take(&mut state.borrow_mut().engine_setup.deferred_paths);
-                        if !paths.is_empty() { ui.set_show_engine_setup(false); import_paths(ui, state, paths); }
+                        if !paths.is_empty() { close(ui); import_paths(ui, state, paths); }
                     },
                     Err(error) => {
                         state.borrow_mut().engine_setup.ready = false;

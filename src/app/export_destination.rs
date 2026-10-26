@@ -67,8 +67,8 @@ pub(super) fn resolve(folder_text: &str, filename: &str) -> Result<PathBuf, Stri
     }
     let mut name = filename.to_string();
     if Path::new(filename).extension().is_none() { name.push_str(".mp4"); }
-    if !name.to_ascii_lowercase().ends_with(".mp4") {
-        return Err("Use the .mp4 extension. This export produces an MP4 video.".into());
+    if !name.to_ascii_lowercase().ends_with(".mp4") && !name.to_ascii_lowercase().ends_with(".wav") {
+        return Err("Use .mp4 for video or .wav for audio.".into());
     }
     if name.len() > 240 || name.encode_utf16().count() > 240 {
         return Err("Use a shorter filename (up to 240 bytes; some characters take more than one byte).".into());
